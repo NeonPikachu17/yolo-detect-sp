@@ -6,11 +6,18 @@ import 'package:image_picker/image_picker.dart';
 import 'package:ultralytics_yolo/ultralytics_yolo.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
+import 'package:shared_preferences/shared_preferences.dart'; // If using SharedPreferences
+import 'package:connectivity_plus/connectivity_plus.dart';
 
 // Add this import statement:
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_ml_model_downloader/firebase_ml_model_downloader.dart';
 import 'firebase_options.dart';
+
+const String _activeModelFileName = "active_custom_yolo_model.tflite";
+const String _activeLabelsFileName = "active_custom_yolo_labels.txt";
+const String _prefsKeyLastModelName = "last_downloaded_model_name";
+const String _prefsKeyLastModelFirebaseName = "last_downloaded_model_firebase_name";
 
 Future<void> main() async { // Mark main as async and return Future<void>
   WidgetsFlutterBinding.ensureInitialized();
@@ -64,12 +71,14 @@ class _DetectionScreenState extends State<DetectionScreen> {
   File? _imageFile;
   List<Map<String, dynamic>> _recognitions = [];
   bool _isLoading = false;
-  String? _selectedModelName;
-  String? _currentModelPath;
+  String? _selectedModelName; // This will reflect the model selected in dropdown
+  // String? _currentModelPath; // We'll use the fixed local path
   Uint8List? _annotatedImageBytes;
-
-  // Add this line to declare the _loadingMessage variable:
   String? _loadingMessage;
+
+  String? _currentModelPath;         // To store the path of the actively loaded model
+  double _originalImageWidth = 0.0;  // For responsive bounding box scaling
+  double _originalImageHeight = 0.0; // For responsive bounding box scaling
 
   final List<Color> _boxColors = [
     Colors.red, Colors.blue, Colors.green, Colors.yellow.shade700,
@@ -101,6 +110,76 @@ class _DetectionScreenState extends State<DetectionScreen> {
     },
   ];
 
+  @override
+  void initState() {
+    super.initState();
+    _autoLoadLastUsedModel(); // Try to load last used model on init
+  }
+
+  Future<void> _autoLoadLastUsedModel() async {
+    final prefs = await SharedPreferences.getInstance();
+    final lastModelDisplayName = prefs.getString(_prefsKeyLastModelName);
+    final lastFirebaseModelName = prefs.getString(_prefsKeyLastModelFirebaseName);
+
+    if (lastModelDisplayName != null && lastFirebaseModelName != null) {
+      final localModelPath = await _getLocalModelPath();
+      final localLabelsPath = await _getLocalLabelsPath();
+
+      if (await File(localModelPath).exists() && await File(localLabelsPath).exists()) {
+        // Find the full model data from _availableModels
+        final modelData = _availableModels.firstWhere(
+          (m) => m['name'] == lastModelDisplayName && m['firebaseModelName'] == lastFirebaseModelName,
+          orElse: () => <String,String>{}, // Return empty map if not found
+        );
+
+        if (modelData.isNotEmpty) {
+          debugPrint("Last used model '$lastModelDisplayName' found locally. Attempting auto-load.");
+          // Set the selected name so dropdown reflects it
+          setState(() {
+            _selectedModelName = lastModelDisplayName;
+          });
+          await _prepareAndLoadModel(modelData, isInitialLoad: true, isAutoLoadingPrevious: true);
+        } else {
+           debugPrint("Could not find model data for $lastModelDisplayName in _availableModels.");
+        }
+      } else {
+        debugPrint("Previously used model files not found locally. Clearing preferences.");
+        await prefs.remove(_prefsKeyLastModelName);
+        await prefs.remove(_prefsKeyLastModelFirebaseName);
+      }
+    }
+  }
+
+  Future<String> _getLocalModelPath() async {
+    final directory = await getApplicationDocumentsDirectory();
+    return p.join(directory.path, _activeModelFileName);
+  }
+
+  Future<String> _getLocalLabelsPath() async {
+    final directory = await getApplicationDocumentsDirectory();
+    return p.join(directory.path, _activeLabelsFileName);
+  }
+
+  Future<void> _deleteActiveModelFiles() async {
+    try {
+      final modelPath = await _getLocalModelPath();
+      final labelsPath = await _getLocalLabelsPath();
+      final modelFile = File(modelPath);
+      final labelsFile = File(labelsPath);
+
+      if (await modelFile.exists()) {
+        await modelFile.delete();
+        debugPrint("Deleted active model file: $modelPath");
+      }
+      if (await labelsFile.exists()) {
+        await labelsFile.delete();
+        debugPrint("Deleted active labels file: $labelsPath");
+      }
+    } catch (e) {
+      debugPrint("Error deleting active model files: $e");
+    }
+  }
+
   void _clearScreen() {
     setState(() {
       _imageFile = null;
@@ -109,141 +188,154 @@ class _DetectionScreenState extends State<DetectionScreen> {
     });
   }
 
-  Future<void> _prepareAndLoadModel(Map<String, String> modelData) async {
-    _clearScreen(); // Clear screen before loading new model
+  // Modified _prepareAndLoadModel
+  Future<void> _prepareAndLoadModel(Map<String, String> modelData, {bool isInitialLoad = false, bool isAutoLoadingPrevious = false}) async {
+    if (!isInitialLoad) {
+      _clearScreen();
+    }
 
-    final String modelNameDisplay = modelData['name'] as String;
-    final String firebaseModelName = modelData['firebaseModelName'] as String;
+    final String modelNameDisplay = modelData['name']!; // Assume 'name' is always present
+    final String firebaseModelName = modelData['firebaseModelName']!; // Assume always present
 
     setState(() {
       _isLoading = true;
       _loadingMessage = "Preparing model: $modelNameDisplay";
     });
-    
-    // if (modelData['modelAssetPath'] == null || modelData['labelsAssetPath'] == null) {
-    //   ScaffoldMessenger.of(context).showSnackBar(
-    //     const SnackBar(content: Text("Model or labels asset path is missing.")),
-    //   );
-    //   return;
-    // }
 
-        try {
-      // 1. Download/Get the TFLite model from Firebase ML
-      setState(() { _loadingMessage = "Checking for $modelNameDisplay model updates..."; });
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final String? lastStoredFirebaseModelName = prefs.getString(_prefsKeyLastModelFirebaseName);
 
-      final FirebaseModelDownloader modelDownloader = FirebaseModelDownloader.instance;
-      final FirebaseCustomModel localModel = await modelDownloader.getModel(
-        firebaseModelName, // Name given in Firebase ML Console
-        FirebaseModelDownloadType.localModelUpdateInBackground, // Or .latestModel, .localModel
-        FirebaseModelDownloadConditions(
-          iosAllowsCellularAccess: true,
-          androidWifiRequired: true,
-        ),
-      );
+      final String targetLocalModelPath = await _getLocalModelPath();
+      final String targetLocalLabelsPath = await _getLocalLabelsPath();
+      File modelFile = File(targetLocalModelPath);
 
-      final String localModelPath = localModel.file.path;
-      debugPrint("Firebase ML Model '$firebaseModelName' available at: $localModelPath");
+      bool modelFileExists = await modelFile.exists();
+      bool isSwitchingModels = (lastStoredFirebaseModelName != null && lastStoredFirebaseModelName != firebaseModelName);
+      bool needsDownloadOrNewCopy = !modelFileExists || isSwitchingModels;
 
-      // 2. Prepare the labels file path
-      String localLabelsPath;
-      final String? labelsAssetPath = modelData['labelsAssetPath'] as String?;
-      // final String? labelsStoragePath = modelData['labelsStoragePath'] as String?; // For Option B
-      // final String? labelsLocalName = modelData['labelsLocalName'] as String?; // For Option B
+      // If we are auto-loading a previous model, and it exists, we assume labels also exist.
+      // If it's a user selection (not auto-load) or model file doesn't exist, we might need to download/recopy.
+      if (isAutoLoadingPrevious && modelFileExists) {
+          debugPrint("Auto-loading existing model: $modelNameDisplay");
+          // Assume labels are also fine if model is fine from previous session
+      } else if (needsDownloadOrNewCopy) {
+        // Check internet ONLY if we need to download a NEW model from Firebase
+        final connectivityResult = await Connectivity().checkConnectivity();
+        final bool isConnected = connectivityResult.contains(ConnectivityResult.mobile) ||
+                                 connectivityResult.contains(ConnectivityResult.wifi) ||
+                                 connectivityResult.contains(ConnectivityResult.ethernet);
 
-      if (labelsAssetPath != null) { // Option A: Labels from app assets
-        setState(() { _loadingMessage = "Preparing labels..."; });
-        localLabelsPath = await getAbsolutePath(labelsAssetPath); // Your existing helper
+        if (!isConnected) {
+          throw Exception("Offline. Cannot download '$modelNameDisplay'.");
+        }
+
+        // Different model selected or current active model file is missing, and we are online.
+        // So, delete whatever was previously active and download the new one.
+        await _deleteActiveModelFiles();
+
+        setState(() { _loadingMessage = "Downloading $modelNameDisplay..."; });
+        final FirebaseModelDownloader modelDownloader = FirebaseModelDownloader.instance;
+        final FirebaseCustomModel downloadedModel = await modelDownloader.getModel(
+          firebaseModelName,
+          FirebaseModelDownloadType.latestModel,
+          FirebaseModelDownloadConditions(
+            iosAllowsCellularAccess: true,
+            androidWifiRequired: true, // Allow download on cellular
+          ),
+        );
+        await downloadedModel.file.copy(targetLocalModelPath); // Copy to our fixed path
+        debugPrint("Model '$firebaseModelName' downloaded to: $targetLocalModelPath");
+      } else {
+         debugPrint("Model '$modelNameDisplay' is current and exists locally at $targetLocalModelPath.");
       }
-      // else if (labelsStoragePath != null && labelsLocalName != null) { // Option B: Download labels
-      //   setState(() { _loadingMessage = "Checking labels..."; });
-      //   localLabelsPath = await _fileDownloadService.getLocalFilePath(labelsLocalName);
-      //   if (!await File(localLabelsPath).exists()) {
-      //     bool isConnected = await _connectivityService.isConnected();
-      //     if (!isConnected) throw Exception("No internet to download labels.");
-      //     setState(() { _loadingMessage = "Downloading labels..."; });
-      //     File? downloadedLabelFile = await _fileDownloadService.downloadFile(labelsStoragePath, labelsLocalName);
-      //     if (downloadedLabelFile == null) throw Exception("Failed to download labels file.");
-      //   }
-      // }
-      else {
-        // This case means labels are neither from assets nor explicitly from remote storage.
-        // The YOLO plugin or model must handle labels internally (e.g. embedded metadata).
-        // Or, you might need to enforce one of the options.
-        // For now, we'll assume if no path, plugin handles it or it's an error later.
-        // Consider throwing an exception if labels are strictly required and no path is found.
-        debugPrint("Warning: Labels path not specified. Assuming model handles labels or plugin finds them by convention.");
-        // If your YOLO plugin REQUIRES a labels path and it's not part of modelData, this will be an issue.
-        // For this example, let's assume your plugin might not need it explicitly passed IF it's a common name like labels.txt
-        // in the same dir or if your model has metadata. This is highly plugin-dependent.
-        // You MIGHT need to ensure labels.txt is copied to the same directory as localModelPath if your plugin expects that.
-        // As a fallback if labelsAssetPath wasn't provided for some reason, let's try the default.
-        // THIS IS A GUESS - VERIFY YOUR YOLO PLUGIN'S LABEL HANDLING
-        localLabelsPath = await getAbsolutePath('assets/models/labels.txt'); // Fallback for example
+
+      // Always ensure labels are present for the *current* model, copy from assets
+      final String? labelsAssetPath = modelData['labelsAssetPath'];
+      if (labelsAssetPath != null) {
+        setState(() { _loadingMessage = "Preparing labels for $modelNameDisplay..."; });
+        final assetLabelsTempPath = await getAbsolutePath(labelsAssetPath);
+        await File(assetLabelsTempPath).copy(targetLocalLabelsPath); // Copy to fixed labels path
+        debugPrint("Labels copied from assets to $targetLocalLabelsPath");
+      } else {
+        throw Exception("labelsAssetPath missing for $modelNameDisplay");
       }
       
-      if (!await File(localLabelsPath).exists()) {
-          throw Exception("Labels file could not be found or prepared from: $localLabelsPath");
+      if (!await File(targetLocalModelPath).exists() || !await File(targetLocalLabelsPath).exists()) {
+        throw Exception("Critical files for '$modelNameDisplay' missing after preparation.");
       }
-      debugPrint("Labels file ready at: $localLabelsPath");
 
-
-      // 3. Load the model using your YOLO plugin
       setState(() { _loadingMessage = "Loading $modelNameDisplay into memory..."; });
-
       _yoloModel = YOLO(
-        modelPath: localModelPath, // Path from FirebaseModelDownloader
+        modelPath: targetLocalModelPath,
         task: YOLOTask.detect,
-        // IMPORTANT: How does your specific YOLO plugin handle labels?
-        // Does it need `labelsPath: localLabelsPath`?
-        // Does it assume `labels.txt` is in the same directory as the model?
-        // Does it read labels from model metadata?
-        // You MUST verify this for your specific `ultralytics_yolo` plugin.
+        // !! CRITICAL: How does your plugin use labels? Pass targetLocalLabelsPath if needed !!
+        // e.g., labelsPath: targetLocalLabelsPath,
       );
       await _yoloModel?.loadModel();
 
+      await prefs.setString(_prefsKeyLastModelName, modelNameDisplay);
+      await prefs.setString(_prefsKeyLastModelFirebaseName, firebaseModelName);
+
       setState(() {
         _selectedModelName = modelNameDisplay;
-        // _currentModelPath = localModelPath; // If you need to keep track
+        _currentModelPath = targetLocalModelPath; // Update active model path
       });
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("$modelNameDisplay loaded successfully and ready.")),
-      );
+      if(mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("$modelNameDisplay ready.")),
+        );
+      }
 
     } catch (e) {
       debugPrint("Error in _prepareAndLoadModel: $e");
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Failed to load model: ${e.toString()}")),
-      );
-      setState(() {
-        _yoloModel = null;
-        _selectedModelName = null;
-      });
+      if(mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Failed to load model: ${e.toString()}")),
+        );
+        setState(() {
+          _yoloModel = null;
+          // Don't clear _selectedModelName here, so dropdown shows what failed
+          _currentModelPath = null;
+        });
+      }
     } finally {
-      setState(() {
-        _isLoading = false;
-        _loadingMessage = null;
-      });
+      if(mounted){
+        setState(() {
+          _isLoading = false;
+          _loadingMessage = null;
+        });
+      }
     }
-
   }
 
-  Future<void> _pickImage() async {
+   // In _pickImage(), ensure _currentModelPath is checked or _yoloModel is loaded
+   Future<void> _pickImage() async {
     final ImagePicker picker = ImagePicker();
     final XFile? image = await picker.pickImage(source: ImageSource.gallery);
     if (image != null) {
+      final File imageFile = File(image.path);
+      final imageBytesForDimensions = await imageFile.readAsBytes();
+      final decodedImage = await decodeImageFromList(imageBytesForDimensions);
+      
       setState(() {
-        _imageFile = File(image.path);
+        _imageFile = imageFile;
+        _originalImageWidth = decodedImage.width.toDouble();
+        _originalImageHeight = decodedImage.height.toDouble();
         _recognitions = [];
         _annotatedImageBytes = null;
       });
 
-      if (_yoloModel != null) {
+      // Check if a model is loaded and its file exists
+      if (_yoloModel != null && _currentModelPath != null && await File(_currentModelPath!).exists()) {
         _runDetection();
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Please select and load a model first.")),
-        );
+         if(mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text("Model not loaded or file missing. Please select and load a model.")),
+            );
+         }
       }
     }
   }
