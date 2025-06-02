@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "69159088182",
+    "project_id": "tflite-server-67532",
+    "storage_bucket": "tflite-server-67532.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:69159088182:android:7bd722c51d8c15b738e897",
+        "android_client_info": {
+          "package_name": "com.example.yolo_detect"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDbAdfuIPPI7Ic7gawbhtaQUSTByfOOumQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
