@@ -82,6 +82,16 @@ class _DetectionScreenState extends State<DetectionScreen> {
   double _originalImageHeight = 0;
   double _originalImageWidth = 0;
 
+  // --- NEW INTERACTIVE STATE VARIABLES ---
+  int? _selectedDetectionIndex;
+  bool _showMasks = true;
+  double _maskOpacity = 0.5;
+  // --- END OF NEW VARIABLES ---
+
+  // --- NEW STATE VARIABLE FOR CACHE STATUS ---
+  bool _isModelLoadedFromCache = false;
+
+
   final List<Color> _boxColors = [
     Colors.red, Colors.blue, Colors.green, Colors.yellow.shade700,
     Colors.purple, Colors.orange, Colors.pink, Colors.teal,
@@ -184,13 +194,14 @@ class _DetectionScreenState extends State<DetectionScreen> {
     return [];
   }
 
-  Future<Map<String, dynamic>?> _getLocallyActiveModelData(
-      SharedPreferences prefs) async {
+  Future<Map<String, dynamic>?> _getLocallyActiveModelData(SharedPreferences prefs) async {
     final lastModelDisplayName = prefs.getString(_prefsKeyLastModelName);
     final lastFirebaseModelName = prefs.getString(_prefsKeyLastModelFirebaseName);
 
     if (lastModelDisplayName != null && lastFirebaseModelName != null) {
-      final localModelPath = await _getLocalModelPath();
+      // --- FIX: Pass the required 'lastFirebaseModelName' argument ---
+      final localModelPath = await _getLocalModelPath(lastFirebaseModelName); 
+
       if (await File(localModelPath).exists()) {
         return {
           'name': lastModelDisplayName,
@@ -205,48 +216,34 @@ class _DetectionScreenState extends State<DetectionScreen> {
   Future<void> _autoLoadLastUsedModel() async {
     final prefs = await SharedPreferences.getInstance();
     final lastModelDisplayName = prefs.getString(_prefsKeyLastModelName);
-    final lastFirebaseModelName = prefs.getString(_prefsKeyLastModelFirebaseName);
 
-    if (lastModelDisplayName != null &&
-        lastFirebaseModelName != null &&
-        _availableModels.isNotEmpty) {
-      final localModelPath = await _getLocalModelPath();
-      final localLabelsPath = await _getLocalLabelsPath();
-
-      if (await File(localModelPath).exists() &&
-          await File(localLabelsPath).exists()) {
-        final modelData = _availableModels.firstWhere(
-            (m) =>
-                m['name'] == lastModelDisplayName &&
-                m['firebaseModelName'] == lastFirebaseModelName,
-            orElse: () => <String, dynamic>{});
-        if (modelData.isNotEmpty) {
-          debugPrint("Last used model '$lastModelDisplayName' found locally. Attempting auto-load.");
-          if (mounted) {
-            setState(() {
-              _selectedModelName = lastModelDisplayName;
-            });
-          }
-          await _prepareAndLoadModel(modelData, isInitialLoad: true, isAutoLoadingPrevious: true);
-        }
+    if (lastModelDisplayName != null) {
+      final modelData = _availableModels.firstWhere(
+          (m) => m['name'] == lastModelDisplayName,
+          orElse: () => {});
+      
+      if (modelData.isNotEmpty) {
+        // Use the main prepare function for auto-loading
+        await _prepareAndLoadModel(modelData, isInitialLoad: true);
       }
     } else {
       if (mounted) setState(() { _isLoading = false; _loadingMessage = null; });
     }
   }
 
-  Future<String> _getLocalModelPath() async => p.join((await getApplicationDocumentsDirectory()).path, _activeModelFileName);
-  Future<String> _getLocalLabelsPath() async => p.join((await getApplicationDocumentsDirectory()).path, _activeLabelsFileName);
+  Future<String> _getLocalModelPath(String firebaseModelName) async {
+    final docDir = await getApplicationDocumentsDirectory();
+    return p.join(docDir.path, "$firebaseModelName.tflite");
+  }
+
+  Future<String> _getLocalLabelsPath(String firebaseModelName) async {
+    final docDir = await getApplicationDocumentsDirectory();
+    return p.join(docDir.path, "$firebaseModelName.txt");
+  }
 
   Future<void> _downloadModel(String modelName, String firebaseModelName, String labelsAssetPath) async {
-    final connectivityResult = await Connectivity().checkConnectivity();
-    final bool isConnected = connectivityResult.any((r) => r == ConnectivityResult.wifi || r == ConnectivityResult.mobile || r == ConnectivityResult.ethernet);
-    if (!isConnected) {
-      throw Exception("Offline. Cannot download or switch to '$modelName'.");
-    }
-
-    await _deleteActiveModelFiles();
-
+    // No longer need to delete old files, as we're saving to a new unique file.
+    
     setState(() { _loadingMessage = "Downloading $modelName..."; });
     final FirebaseModelDownloader modelDownloader = FirebaseModelDownloader.instance;
     final FirebaseCustomModel downloadedModel = await modelDownloader.getModel(
@@ -258,25 +255,16 @@ class _DetectionScreenState extends State<DetectionScreen> {
       ),
     );
 
-    final targetLocalModelPath = await _getLocalModelPath();
+    // Get the unique path for this model
+    final targetLocalModelPath = await _getLocalModelPath(firebaseModelName);
     await downloadedModel.file.copy(targetLocalModelPath);
     debugPrint("Model '$firebaseModelName' downloaded to: $targetLocalModelPath");
     
-    final targetLocalLabelsPath = await _getLocalLabelsPath();
+    // Get the unique path for the labels
+    final targetLocalLabelsPath = await _getLocalLabelsPath(firebaseModelName);
     final assetLabelsTempPath = await getAbsolutePath(labelsAssetPath);
     await File(assetLabelsTempPath).copy(targetLocalLabelsPath);
-    debugPrint("Labels copied from assets to $targetLocalLabelsPath");
-  }
-
-  Future<void> _deleteActiveModelFiles() async {
-    try {
-      final modelFile = File(await _getLocalModelPath());
-      final labelsFile = File(await _getLocalLabelsPath());
-      if (await modelFile.exists()) await modelFile.delete();
-      if (await labelsFile.exists()) await labelsFile.delete();
-    } catch (e) {
-      debugPrint("Error deleting active model files: $e");
-    }
+    debugPrint("Labels for '$firebaseModelName' copied to $targetLocalLabelsPath");
   }
 
   void _clearScreen() {
@@ -288,13 +276,22 @@ class _DetectionScreenState extends State<DetectionScreen> {
     });
   }
 
-  Future<void> _prepareAndLoadModel(Map<String, dynamic> modelData, {bool isInitialLoad = false, bool isAutoLoadingPrevious = false}) async {
+  @override
+  void dispose() {
+    // It's crucial to dispose of the model when the screen is closed.
+    _yoloModel?.dispose();
+    super.dispose();
+  }
+
+  Future<void> _prepareAndLoadModel(Map<String, dynamic> modelData, {bool isInitialLoad = false}) async {
     if (!isInitialLoad) {
       _clearScreen();
     }
+    setState(() { _isModelLoadedFromCache = false; });
 
     final String modelNameDisplay = modelData['name'] as String;
     final String firebaseModelName = modelData['firebaseModelName'] as String;
+    final String labelsAssetPath = modelData['labelsAssetPath'] as String;
 
     if (!mounted) return;
     setState(() {
@@ -303,44 +300,46 @@ class _DetectionScreenState extends State<DetectionScreen> {
     });
 
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final String? lastStoredFirebaseModelName = prefs.getString(_prefsKeyLastModelFirebaseName);
+      final String targetModelPath = await _getLocalModelPath(firebaseModelName);
+      final modelFile = File(targetModelPath);
+      bool loadedFromCache = false;
 
-      final String targetLocalModelPath = await _getLocalModelPath();
-      final String targetLocalLabelsPath = await _getLocalLabelsPath();
-      File modelFile = File(targetLocalModelPath);
-
-      bool modelFileExists = await modelFile.exists();
-      bool isSwitchingModels = (lastStoredFirebaseModelName != null && lastStoredFirebaseModelName != firebaseModelName);
-      bool needsDownloadOrNewCopy = !modelFileExists || isSwitchingModels;
-
-      if (isAutoLoadingPrevious && modelFileExists && !isSwitchingModels) {
-        debugPrint("Auto-loading existing model: $modelNameDisplay from $targetLocalModelPath");
-      } else if (needsDownloadOrNewCopy) {
-        await _downloadModel(modelNameDisplay, firebaseModelName, modelData['labelsAssetPath'] as String);
+      if (!await modelFile.exists()) {
+        debugPrint("Local file for '$modelNameDisplay' not found. Downloading...");
+        await _downloadModel(modelNameDisplay, firebaseModelName, labelsAssetPath);
+        loadedFromCache = false;
       } else {
-        debugPrint("Model '$modelNameDisplay' is current and already exists locally.");
-      }
-      
-      if (!await File(targetLocalModelPath).exists() || !await File(targetLocalLabelsPath).exists()) {
-        throw Exception("Critical files for '$modelNameDisplay' missing after all preparations.");
+        debugPrint("Found local model for '$modelNameDisplay'. Loading from cache.");
+        loadedFromCache = true;
       }
 
       setState(() { _loadingMessage = "Loading $modelNameDisplay into memory..."; });
       
+      // --- NEW DISPOSE AND RE-CREATE LOGIC ---
+      // If a model instance already exists, dispose of it first to free up resources.
+      if (_yoloModel != null) {
+        debugPrint("Disposing previous model instance...");
+        await _yoloModel!.dispose();
+      }
+
+      // Always create a new instance for the selected model.
+      debugPrint("Initializing new YOLO instance for '$modelNameDisplay'...");
       _yoloModel = YOLO(
-        modelPath: targetLocalModelPath, 
+        modelPath: targetModelPath,
         task: YOLOTask.segment,
       );
       await _yoloModel?.loadModel();
+      // --- END NEW LOGIC ---
 
+      final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_prefsKeyLastModelName, modelNameDisplay);
       await prefs.setString(_prefsKeyLastModelFirebaseName, firebaseModelName);
 
       if (!mounted) return;
       setState(() {
         _selectedModelName = modelNameDisplay;
-        _currentModelPath = targetLocalModelPath;
+        _currentModelPath = targetModelPath;
+        _isModelLoadedFromCache = loadedFromCache;
       });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("$modelNameDisplay ready.")),
@@ -355,6 +354,7 @@ class _DetectionScreenState extends State<DetectionScreen> {
         setState(() {
           _yoloModel = null;
           _currentModelPath = null;
+          _isModelLoadedFromCache = false;
         });
       }
     } finally {
@@ -365,6 +365,106 @@ class _DetectionScreenState extends State<DetectionScreen> {
         });
       }
     }
+  }
+
+  Future<void> _deleteLocallyStoredModel() async {
+    if (_yoloModel == null || _selectedModelName == null) return;
+
+    final modelToDelete = _availableModels.firstWhere((m) => m['name'] == _selectedModelName);
+    final firebaseModelName = modelToDelete['firebaseModelName'];
+    
+    setState(() { /* ... loading state ... */ });
+
+    // Delete the specific files for this model
+    final modelFile = File(await _getLocalModelPath(firebaseModelName));
+    final labelsFile = File(await _getLocalLabelsPath(firebaseModelName));
+    if (await modelFile.exists()) await modelFile.delete();
+    if (await labelsFile.exists()) await labelsFile.delete();
+
+    // Clear SharedPreferences if the deleted model was the last used one
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getString(_prefsKeyLastModelFirebaseName) == firebaseModelName) {
+      await prefs.remove(_prefsKeyLastModelName);
+      await prefs.remove(_prefsKeyLastModelFirebaseName);
+    }
+
+    _clearScreen();
+    setState(() {
+      _yoloModel = null;
+      _currentModelPath = null;
+      _selectedModelName = null;
+      _isModelLoadedFromCache = false;
+      _isLoading = false;
+      _loadingMessage = null;
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text("Local model '${modelToDelete['name']}' has been deleted.")),
+    );
+  }
+
+  Widget _buildModelManagementSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: DropdownButtonFormField<String>(
+                decoration: const InputDecoration(
+                  labelText: "Select Model",
+                  border: OutlineInputBorder(),
+                ),
+                hint: const Text("Select a Model to Load"),
+                value: _selectedModelName,
+                isExpanded: true,
+                items: _availableModels.map((model) {
+                  return DropdownMenuItem<String>(
+                    value: model['name'] as String?,
+                    child: Text(model['name'] as String? ?? "Unnamed Model"),
+                  );
+                }).toList(),
+                onChanged: _isLoading ? null : (String? newValue) {
+                  if (newValue != null) {
+                    final selectedModelData =
+                        _availableModels.firstWhere((m) => m['name'] == newValue, orElse: () => {});
+                    if (selectedModelData.isNotEmpty) {
+                      _prepareAndLoadModel(selectedModelData);
+                    }
+                  }
+                },
+              ),
+            ),
+            // Add the delete button, only visible when a model is loaded
+            if (_yoloModel != null && !_isLoading)
+              IconButton(
+                icon: const Icon(Icons.delete_outline, color: Colors.red),
+                tooltip: "Delete Local Model Cache",
+                onPressed: _deleteLocallyStoredModel,
+              ),
+          ],
+        ),
+        // Add the status indicator, only visible when a model is loaded
+        if (_yoloModel != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 8.0),
+            child: Row(
+              children: [
+                Icon(
+                  _isModelLoadedFromCache ? Icons.storage_rounded : Icons.cloud_download_rounded,
+                  color: Colors.grey.shade600,
+                  size: 16,
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  _isModelLoadedFromCache ? "Status: Loaded from Local Cache" : "Status: Freshly Downloaded",
+                  style: TextStyle(color: Colors.grey.shade600, fontStyle: FontStyle.italic),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
   }
 
   Future<void> _pickImage() async {
@@ -396,6 +496,35 @@ class _DetectionScreenState extends State<DetectionScreen> {
     }
   }
 
+  // Add this helper function inside your _DetectionScreenState class
+  void _prettyPrintMap(dynamic data, {String indent = ''}) {
+    if (data is Map) {
+      data.forEach((key, value) {
+        if (value is Map || value is List) {
+          debugPrint('$indent$key: (${value.runtimeType})');
+          _prettyPrintMap(value, indent: '$indent  ');
+        } else if (value is Uint8List) {
+          debugPrint('$indent$key: (${value.runtimeType}), Length: ${value.length}');
+        }
+        else {
+          debugPrint('$indent$key: ${value.toString()}');
+        }
+      });
+    } else if (data is List) {
+      if (data.isEmpty) {
+        debugPrint('$indent- Empty List');
+        return;
+      }
+      // Only print details for the first item of a list to avoid flooding the console
+      debugPrint('$indent[ ... ${data.length} items ... ]');
+      debugPrint('$indent  First item:');
+      _prettyPrintMap(data.first, indent: '$indent    ');
+
+    } else {
+      debugPrint('$indent${data.toString()}');
+    }
+  }
+
   Future<void> _runSegmentation() async {
     if (_imageFile == null || _yoloModel == null) return;
 
@@ -406,16 +535,30 @@ class _DetectionScreenState extends State<DetectionScreen> {
 
     try {
       final imageBytes = await _imageFile!.readAsBytes();
-      final double confThreshold = 0.6;
+      final double confThreshold = 0.5;
       final double nmsThreshold = 0.5;
 
       debugPrint("Running segmentation with confidence: $confThreshold, IoU: $nmsThreshold");
+
+      // --- NEW DEBUG LINE ADDED HERE ---
+      debugPrint("--> Using model for prediction: '$_selectedModelName'");
 
       final detections = await _yoloModel!.predict(
         imageBytes,
         confidenceThreshold: confThreshold,
         iouThreshold: nmsThreshold,
       );
+
+      // ===================================================================
+      // ============= COMPREHENSIVE DEBUG OUTPUT STARTS HERE =============
+      // ===================================================================
+      debugPrint("----------------------------------------------------");
+      debugPrint("--- Comprehensive Detections Map Structure ---");
+      _prettyPrintMap(detections);
+      debugPrint("----------------------------------------------------");
+      // ===================================================================
+      // ============== COMPREHENSIVE DEBUG OUTPUT ENDS HERE ==============
+      // ===================================================================
 
       if (!mounted) return;
 
@@ -469,28 +612,42 @@ class _DetectionScreenState extends State<DetectionScreen> {
       appBar: AppBar(
         title: const Text("Pest Detection"),
         centerTitle: true,
+        elevation: 2,
       ),
       body: RefreshIndicator(
         onRefresh: _handleRefresh,
-        child: SingleChildScrollView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
-              _buildModelSelector(),
-              const SizedBox(height: 16),
-              ElevatedButton.icon(
-                icon: const Icon(Icons.image_search),
-                label: const Text("Pick Image from Gallery"),
-                onPressed: _isLoading ? null : _pickImage,
-                style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 16)),
+        child: Builder(
+          builder: (context) {
+            final screenWidth = MediaQuery.of(context).size.width;
+            final horizontalPadding = screenWidth > 600 ? screenWidth * 0.1 : 16.0;
+
+            return SingleChildScrollView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: EdgeInsets.symmetric(horizontal: horizontalPadding, vertical: 20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  _buildModelManagementSection(),
+                  const SizedBox(height: 20),
+                  ElevatedButton.icon(
+                    icon: const Icon(Icons.photo_library_outlined),
+                    label: const Text("Pick Image from Gallery"),
+                    onPressed: _isLoading ? null : _pickImage,
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 24),
+                      textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  
+                  _buildContentArea(),
+                ],
               ),
-              const SizedBox(height: 20),
-              
-              _buildContentArea(),
-            ],
-          ),
+            );
+          }
         ),
       ),
     );
@@ -500,18 +657,23 @@ class _DetectionScreenState extends State<DetectionScreen> {
     if (_isLoading) {
       return Center(
         child: Padding(
-          padding: const EdgeInsets.all(20.0),
+          padding: const EdgeInsets.symmetric(vertical: 50.0),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Image.asset(
+              // Ensure you have a 'loading.gif' in an 'assets/images/' directory
+              Image.asset( 
                 'assets/images/loading.gif',
-                width: 100,
-                height: 100,
+                width: 120,
+                height: 120,
               ),
               if (_loadingMessage != null && _loadingMessage!.isNotEmpty) ...[
-                const SizedBox(height: 15),
-                Text(_loadingMessage!, textAlign: TextAlign.center, style: Theme.of(context).textTheme.bodyLarge),
+                const SizedBox(height: 20),
+                Text(
+                  _loadingMessage!,
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(color: Colors.grey.shade700),
+                ),
               ]
             ],
           ),
@@ -519,45 +681,112 @@ class _DetectionScreenState extends State<DetectionScreen> {
       );
     }
 
+    // Show results view if an image has been analyzed
     if (_imageFile != null) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text("Analysis Result", style: Theme.of(context).textTheme.headlineSmall),
-          const SizedBox(height: 12),
-
-          if (_recognitions.isNotEmpty)
-            _buildImageWithDetections()
-          else
-            Image.file(_imageFile!),
-          
-          const SizedBox(height: 20),
-
-          if (_recognitions.isEmpty && !_isLoading)
-            const Center(child: Text("No objects detected with high confidence.", style: TextStyle(fontSize: 16))),
-
-          if (_recognitions.isNotEmpty) ...[
-            Text("Detected Objects: ${_recognitions.length}", style: Theme.of(context).textTheme.titleLarge),
-            const SizedBox(height: 10),
-            _buildDetectionList(),
-            
-            const SizedBox(height: 20),
-            if (_annotatedImageBytes != null) ...[
-              Text("Library's Annotated Image (for comparison)", style: Theme.of(context).textTheme.titleMedium),
-              const SizedBox(height: 10),
-              Image.memory(_annotatedImageBytes!),
-            ]
-          ]
-        ],
+      // Use a LayoutBuilder to create a responsive UI
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          // Use a side-by-side layout for wide screens (tablets, landscape phones)
+          if (constraints.maxWidth > 600) {
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  flex: 6, // Image takes 60% of the space
+                  child: _buildResultsImage(),
+                ),
+                const SizedBox(width: 20),
+                Expanded(
+                  flex: 4, // List and controls take 40%
+                  child: _buildResultsList(),
+                ),
+              ],
+            );
+          } else {
+            // Use a top-and-bottom layout for narrow screens (portrait phones)
+            return Column(
+              children: [
+                _buildResultsImage(),
+                const SizedBox(height: 20),
+                _buildResultsList(),
+              ],
+            );
+          }
+        },
       );
     }
     
-    return const Center(
-      child: Text(
-        "Select a model and pick an image to begin.",
-        textAlign: TextAlign.center,
-        style: TextStyle(fontSize: 18, color: Colors.grey),
+    // Default state when no image is picked yet
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 60),
+      child: Center(
+        child: Text(
+          "Select a model and pick an image to begin.",
+          textAlign: TextAlign.center,
+          style: Theme.of(context).textTheme.titleLarge?.copyWith(color: Colors.grey.shade600),
+        ),
       ),
+    );
+  }
+
+  // Add this new helper method to build the interactive controls panel
+  Widget _buildInteractiveControls() {
+  return Card(
+    elevation: 2,
+    shadowColor: Colors.black.withOpacity(0.1),
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+    child: Padding(
+      padding: const EdgeInsets.all(12.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text("Show Masks", style: TextStyle(fontWeight: FontWeight.bold)),
+              Switch(
+                value: _showMasks,
+                onChanged: (value) {
+                  setState(() {
+                    _showMasks = value;
+                  });
+                },
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          const Text("Mask Opacity", style: TextStyle(fontWeight: FontWeight.bold)),
+          Slider(
+            value: _maskOpacity,
+            min: 0.1,
+            max: 1.0,
+            onChanged: (value) {
+              setState(() {
+                _maskOpacity = value;
+              });
+            },
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+  // Add this new helper widget for the "No Detections" case
+  Widget _buildNoDetectionsFound() {
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        Image.file(_imageFile!),
+        Container(
+          color: Colors.black.withOpacity(0.6),
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+          child: const Text(
+            "No objects detected",
+            style: TextStyle(fontSize: 18, color: Colors.white, fontWeight: FontWeight.bold),
+          ),
+        ),
+      ],
     );
   }
   
@@ -592,6 +821,54 @@ class _DetectionScreenState extends State<DetectionScreen> {
           }
         }
       },
+    );
+  }
+
+  // This method builds the main results image view
+  Widget _buildResultsImage() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text("Analysis Result", style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold)),
+        const SizedBox(height: 12),
+        Card(
+          elevation: 4,
+          shadowColor: Colors.black.withOpacity(0.2),
+          clipBehavior: Clip.antiAlias,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          child: _recognitions.isEmpty && !_isLoading
+              ? Center(child: Text("No detections found.")) // Simplified fallback
+              : _buildImageWithDetections(),
+        ),
+      ],
+    );
+  }
+
+  // This method builds the interactive list and controls
+  Widget _buildResultsList() {
+    return Column(
+      children: [
+        // Only show controls if there are detections
+        if (_recognitions.isNotEmpty) ...[
+          _buildInteractiveControls(),
+          const SizedBox(height: 20),
+        ],
+        Text("Detected Objects: ${_recognitions.length}", style: Theme.of(context).textTheme.titleLarge),
+        const SizedBox(height: 10),
+        _buildDetectionList(), // This will now be interactive
+        const SizedBox(height: 24),
+        if (_annotatedImageBytes != null) ...[
+          Text("Library's Raw Output", style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 10),
+          Card(
+            elevation: 4,
+            shadowColor: Colors.black.withOpacity(0.2),
+            clipBehavior: Clip.antiAlias,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            child: Image.memory(_annotatedImageBytes!),
+          )
+        ]
+      ],
     );
   }
 
@@ -639,6 +916,10 @@ class _DetectionScreenState extends State<DetectionScreen> {
                 recognitions: _recognitions,
                 boxColors: _boxColors,
                 scaleRatio: scaleRatio,
+                // Pass the new interactive state to the painter
+                showMasks: _showMasks,
+                maskOpacity: _maskOpacity,
+                selectedDetectionIndex: _selectedDetectionIndex,
               ),
             );
           },
@@ -648,26 +929,35 @@ class _DetectionScreenState extends State<DetectionScreen> {
   }
 
   Widget _buildImageWithBoxesOnly() {
-   return LayoutBuilder(
-    builder: (context, constraints) {
-       final double scaleRatio = constraints.maxWidth / _originalImageWidth;
-       final double responsiveHeight = _originalImageHeight * scaleRatio;
-      return FutureBuilder<ui.Image>(
-        future: _loadImage(_imageFile!),
-        builder: (context, snapshot) {
-          if (!snapshot.hasData) return const SizedBox.shrink();
-          return CustomPaint(
-            size: Size(constraints.maxWidth, responsiveHeight),
-            painter: _DetectionPainter(
-              originalImage: snapshot.data!,
-              recognitions: _recognitions,
-              boxColors: _boxColors,
-              scaleRatio: scaleRatio,
-            ),
-          );
-        },
-      );
-    });
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final double scaleRatio = constraints.maxWidth / _originalImageWidth;
+        final double responsiveHeight = _originalImageHeight * scaleRatio;
+        
+        return FutureBuilder<ui.Image>(
+          future: _loadImage(_imageFile!),
+          builder: (context, snapshot) {
+            if (!snapshot.hasData) return const SizedBox.shrink();
+            
+            return CustomPaint(
+              size: Size(constraints.maxWidth, responsiveHeight),
+              painter: _DetectionPainter(
+                originalImage: snapshot.data!,
+                recognitions: _recognitions,
+                boxColors: _boxColors,
+                scaleRatio: scaleRatio,
+                // --- FIX START: Add the missing interactive parameters ---
+                showMasks: _showMasks,
+                maskOpacity: _maskOpacity,
+                selectedDetectionIndex: _selectedDetectionIndex,
+                // The `maskImage` is intentionally left null for "boxes only" mode.
+                // --- FIX END ---
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   Future<ui.Image> _loadImage(File imageFile) async {
@@ -692,19 +982,27 @@ class _DetectionScreenState extends State<DetectionScreen> {
         final detection = _recognitions[index];
         final className = detection['className'] ?? 'Unknown';
         final confidence = (detection['confidence'] as num).toDouble();
-        final x1 = (detection['x1'] as num).toDouble();
-        final y1 = (detection['y1'] as num).toDouble();
-        final x2 = (detection['x2'] as num).toDouble();
-        final y2 = (detection['y2'] as num).toDouble();
-        final boxWidth = x2 - x1;
-        final boxHeight = y2 - y1;
+        final isSelected = _selectedDetectionIndex == index;
 
         return Card(
+          elevation: isSelected ? 4 : 2,
+          color: isSelected ? Theme.of(context).primaryColor.withOpacity(0.1) : null,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+            side: isSelected 
+              ? BorderSide(color: Theme.of(context).primaryColor, width: 2) 
+              : BorderSide.none,
+          ),
           child: ListTile(
             leading: CircleAvatar(child: Text('${index + 1}')),
             title: Text(className),
             subtitle: Text('Confidence: ${(confidence * 100).toStringAsFixed(1)}%'),
-            trailing: Text('W:${boxWidth.toStringAsFixed(0)}, H:${boxHeight.toStringAsFixed(0)}'),
+            onTap: () {
+              setState(() {
+                // Toggle selection
+                _selectedDetectionIndex = isSelected ? null : index;
+              });
+            },
           ),
         );
       },
@@ -718,6 +1016,10 @@ class _DetectionPainter extends CustomPainter {
   final List<Map<String, dynamic>> recognitions;
   final List<Color> boxColors;
   final double scaleRatio;
+  // New properties for interactivity
+  final bool showMasks;
+  final double maskOpacity;
+  final int? selectedDetectionIndex;
 
   _DetectionPainter({
     required this.originalImage,
@@ -725,6 +1027,10 @@ class _DetectionPainter extends CustomPainter {
     required this.recognitions,
     required this.boxColors,
     required this.scaleRatio,
+    // Add new properties to constructor
+    required this.showMasks,
+    required this.maskOpacity,
+    this.selectedDetectionIndex,
   });
 
   @override
@@ -738,7 +1044,7 @@ class _DetectionPainter extends CustomPainter {
     );
 
     // 2. Selectively draw the mask PNG using clipping
-    if (maskImage != null && recognitions.isNotEmpty) {
+    if (showMasks && maskImage != null && recognitions.isNotEmpty) {
       final stencilPath = Path();
       for (final detection in recognitions) {
         final double x1 = (detection['x1'] as num).toDouble() * scaleRatio;
@@ -750,55 +1056,84 @@ class _DetectionPainter extends CustomPainter {
       
       canvas.save();
       canvas.clipPath(stencilPath);
-      paintImage(
-        canvas: canvas,
-        rect: Rect.fromLTWH(0, 0, size.width, size.height),
-        image: maskImage!,
-        fit: BoxFit.fill,
-      );
+      // Use the Opacity value from the slider
+      final maskPaint = Paint()..color = Colors.white.withOpacity(maskOpacity);
+      canvas.drawImageRect(
+          maskImage!,
+          Rect.fromLTWH(0, 0, maskImage!.width.toDouble(), maskImage!.height.toDouble()),
+          Rect.fromLTWH(0, 0, size.width, size.height),
+          maskPaint,
+        );
       canvas.restore();
     }
 
-    // 3. Draw the bounding box outlines and labels on top
+    // --- 3. DRAW BOUNDING BOXES AND LABELS WITH CLASS-BASED COLORS ---
+    
+     // 3. Draw the bounding box outlines and labels
+    final Map<String, Color> classColorMap = {};
+    int colorIndex = 0;
+
     for (int i = 0; i < recognitions.length; i++) {
       final detection = recognitions[i];
-      final color = boxColors[i % boxColors.length];
+      final className = detection['className'] ?? 'Unknown';
 
+      if (!classColorMap.containsKey(className)) {
+        classColorMap[className] = boxColors[colorIndex % boxColors.length];
+        colorIndex++;
+      }
+      final color = classColorMap[className]!;
+      final isSelected = i == selectedDetectionIndex;
+      
       final double x1 = (detection['x1'] as num).toDouble() * scaleRatio;
       final double y1 = (detection['y1'] as num).toDouble() * scaleRatio;
       final double x2 = (detection['x2'] as num).toDouble() * scaleRatio;
       final double y2 = (detection['y2'] as num).toDouble() * scaleRatio;
-      final String className = detection['className'] ?? 'Unknown';
       final double confidence = (detection['confidence'] as num).toDouble();
 
+      // Draw bounding box outline
       final boxPaint = Paint()
         ..color = color
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 2.0;
+        ..strokeWidth = 2.5;
       canvas.drawRect(Rect.fromLTRB(x1, y1, x2, y2), boxPaint);
 
-      final textSpan = TextSpan(
-        text: '$className (${(confidence * 100).toStringAsFixed(1)}%)',
-        style: TextStyle(
-          color: Colors.white,
-          fontSize: 12,
-          fontWeight: FontWeight.bold,
-          backgroundColor: color,
-        ),
-      );
+      // Draw label
       final textPainter = TextPainter(
-        text: textSpan,
+        text: TextSpan(
+          text: '$className (${(confidence * 100).toStringAsFixed(1)}%)',
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 14,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
         textDirection: TextDirection.ltr,
       );
       textPainter.layout(minWidth: 0, maxWidth: size.width);
-      textPainter.paint(canvas, Offset(x1, y1));
+
+      // Draw a padded background for the label
+      final labelBackgroundPaint = Paint()..color = color;
+      final labelRect = Rect.fromLTWH(
+        x1, 
+        y1, 
+        textPainter.width + 8,
+        textPainter.height + 4,
+      );
+      canvas.drawRect(labelRect, labelBackgroundPaint);
+      
+      // Draw the text on top of the background
+      textPainter.paint(canvas, Offset(x1 + 4, y1 + 2));
     }
   }
 
   @override
   bool shouldRepaint(covariant _DetectionPainter oldDelegate) {
+    // Update shouldRepaint to include the new interactive properties
     return originalImage != oldDelegate.originalImage ||
            maskImage != oldDelegate.maskImage ||
-           recognitions != oldDelegate.recognitions;
+           recognitions != oldDelegate.recognitions ||
+           showMasks != oldDelegate.showMasks ||
+           maskOpacity != oldDelegate.maskOpacity ||
+           selectedDetectionIndex != oldDelegate.selectedDetectionIndex;
   }
 }
