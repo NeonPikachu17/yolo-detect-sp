@@ -30,7 +30,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  ultralytics_yolo: ^0.1.16
+  ultralytics_yolo: ^0.1.26
   image_picker: ^1.1.2
   image: ^4.5.4
   camera: ^0.11.1
@@ -38,9 +38,10 @@ dependencies:
   path_provider: ^2.1.5
 
   # firebase
-  firebase_core: ^3.13.1
-  firebase_ml_model_downloader: ^0.3.3+4
-  firebase_storage: ^12.4.6
+  firebase_core: ^3.14.0 
+  firebase_ml_model_downloader: ^0.3.3+5
+  firebase_storage: ^12.4.7
+  cloud_firestore: ^5.6.9
   # connectivity
   connectivity_plus: ^6.1.4
   shared_preferences: ^2.5.3
