@@ -11,16 +11,17 @@ import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'dart:convert';
-import 'package:cloud_firestore/cloud_firestore.dart';
+// Add these imports to the top of your main.dart file
+import 'package:file_picker/file_picker.dart';
+import 'package:firebase_storage/firebase_storage.dart';
+
 
 import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_ml_model_downloader/firebase_ml_model_downloader.dart';
 import 'firebase_options.dart';
 
-const String _activeModelFileName = "active_custom_yolo_model.tflite";
-const String _activeLabelsFileName = "active_custom_yolo_labels.txt";
+// --- REFACTORED: Constants updated for clarity ---
 const String _prefsKeyLastModelName = "last_downloaded_model_name";
-const String _prefsKeyLastModelFirebaseName = "last_downloaded_model_firebase_name";
+// We only need the display name now, as it will be the unique identifier.
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -81,22 +82,28 @@ class _DetectionScreenState extends State<DetectionScreen> {
   String? _currentModelPath;
   double _originalImageHeight = 0;
   double _originalImageWidth = 0;
+  Set<String> _downloadedModelNames = {};
 
-  // --- NEW INTERACTIVE STATE VARIABLES ---
   int? _selectedDetectionIndex;
   bool _showMasks = true;
   double _maskOpacity = 0.5;
-  // --- END OF NEW VARIABLES ---
+  Map<String, Color> _classColorMap = {};
 
-  // --- NEW STATE VARIABLE FOR CACHE STATUS ---
+  // --- REFACTORED: Simplified upload state variables ---
+  final TextEditingController _modelNameController = TextEditingController();
+  File? _selectedTfliteFile;
+  String? _selectedTfliteFileName;
+  bool _isUploadingModel = false;
   bool _isModelLoadedFromCache = false;
 
+  // +++ NEW: State variable to track internet connectivity +++
+  bool _isConnected = true;
 
   final List<Color> _boxColors = [
-    Colors.red, Colors.blue, Colors.green, Colors.yellow.shade700,
-    Colors.purple, Colors.orange, Colors.pink, Colors.teal,
-    Colors.cyan, Colors.brown, Colors.amber.shade700, Colors.indigo,
-    Colors.lime.shade700, Colors.lightGreen.shade700, Colors.deepOrange, Colors.blueGrey
+  Colors.red, Colors.blue, Colors.green, Colors.yellow.shade700,
+  Colors.purple, Colors.orange, Colors.pink, Colors.teal,
+  Colors.cyan, Colors.brown, Colors.amber.shade700, Colors.indigo,
+  Colors.lime.shade700, Colors.lightGreen.shade700, Colors.deepOrange, Colors.blueGrey
   ];
 
   List<Map<String, dynamic>> _availableModels = [];
@@ -108,39 +115,170 @@ class _DetectionScreenState extends State<DetectionScreen> {
     _initializeScreenData();
   }
 
+  // --- REFACTORED: This function now only selects .tflite files ---
+  Future<void> _selectTfliteFile() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['tflite'],
+    );
+
+    if (result != null && result.files.single.path != null) {
+      setState(() {
+        _selectedTfliteFile = File(result.files.single.path!);
+        _selectedTfliteFileName = result.files.single.name;
+      });
+    } else {
+      debugPrint("No file selected.");
+    }
+  }
+
+  // --- REFACTORED: Upload now only handles the model file ---
+  Future<void> _uploadModel() async {
+    final modelName = _modelNameController.text.trim();
+
+    if (_selectedTfliteFile == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Please select a .tflite model file.")));
+      return;
+    }
+    if (modelName.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Please enter a unique name for the model.")));
+      return;
+    }
+    if (_availableModels.any((m) => m['name'] == modelName)) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("A model named '$modelName' already exists.")));
+      return;
+    }
+
+    setState(() {
+      _isUploadingModel = true;
+      _loadingMessage = "Uploading files to Firebase Storage...";
+    });
+
+    try {
+      final modelFolderPath = 'yoloModels/$modelName';
+
+      // 1. Upload the .tflite file
+      final modelRef = FirebaseStorage.instance.ref('$modelFolderPath/model.tflite');
+      await modelRef.putFile(_selectedTfliteFile!);
+      debugPrint("Model file uploaded to: ${modelRef.fullPath}");
+
+      // 2. Create and upload an empty placeholder labels.txt file to maintain structure
+      final labelsRef = FirebaseStorage.instance.ref('$modelFolderPath/labels.txt');
+      await labelsRef.putString(''); // Upload an empty string
+      debugPrint("Placeholder labels.txt uploaded to: ${labelsRef.fullPath}");
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Model '$modelName' uploaded successfully!"), backgroundColor: Colors.green.shade700),
+        );
+        setState(() {
+          _selectedTfliteFile = null;
+          _selectedTfliteFileName = null;
+          _modelNameController.clear();
+        });
+        _handleRefresh();
+      }
+    } catch (e) {
+      debugPrint("Error uploading model: $e");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Error uploading model: $e"), backgroundColor: Colors.red.shade700),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isUploadingModel = false;
+          _loadingMessage = null;
+        });
+      }
+    }
+  }
+
+
+  // +++ REFACTORED: Check for downloaded models +++
+  Future<void> _updateLocalModelStatus() async {
+    if (_availableModels.isEmpty) return;
+    
+    final Set<String> localNames = {};
+    for (final model in _availableModels) {
+      final modelName = model['name'] as String;
+      final modelPath = await _getLocalModelPath(modelName);
+      final labelsPath = await _getLocalLabelsPath(modelName);
+
+      if (await File(modelPath).exists() && await File(labelsPath).exists()) {
+        localNames.add(modelName);
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _downloadedModelNames = localNames;
+      });
+    }
+  }
+
+  // +++ REFACTORED: Load initial model based on the new structure +++
+  Future<void> _loadInitialModel() async {
+    final prefs = await SharedPreferences.getInstance();
+    final lastModelName = prefs.getString(_prefsKeyLastModelName);
+
+    if (lastModelName == null) {
+      debugPrint("No last-used model found in preferences.");
+      if (mounted) setState(() { _isLoading = false; _loadingMessage = null; });
+      return;
+    }
+
+    final modelData = _availableModels.firstWhere(
+      (m) => m['name'] == lastModelName,
+      orElse: () => <String, dynamic>{},
+    );
+
+    if (modelData.isNotEmpty) {
+      final String modelPath = await _getLocalModelPath(lastModelName);
+      final String labelsPath = await _getLocalLabelsPath(lastModelName);
+
+      if (await File(modelPath).exists() && await File(labelsPath).exists()) {
+        debugPrint("Auto-loading last used model '$lastModelName' from local cache.");
+        await _prepareAndLoadModel(modelData, isInitialLoad: true);
+      } else {
+        debugPrint("Files for last used model not found locally. Waiting for user selection.");
+        if (mounted) setState(() { _isLoading = false; _loadingMessage = null; });
+      }
+    } else {
+      debugPrint("Last used model '$lastModelName' not in the available models list.");
+      if (mounted) setState(() { _isLoading = false; _loadingMessage = null; });
+    }
+  }
+  
+  // --- REFACTORED: Now checks connectivity and updates the UI state ---
   Future<void> _initializeScreenData() async {
     if (!mounted) return;
+
     setState(() {
       _isFetchingModelList = true;
       _isLoading = true;
-      _loadingMessage = "Fetching available models...";
+      _loadingMessage = "Checking for models...";
     });
 
-    final prefs = await SharedPreferences.getInstance();
-    List<Map<String, dynamic>> modelsToShow = [];
     final connectivityResult = await Connectivity().checkConnectivity();
-    final bool isConnected = connectivityResult.any((r) =>
-        r == ConnectivityResult.wifi || r == ConnectivityResult.mobile || r == ConnectivityResult.ethernet);
+    setState(() {
+      _isConnected = connectivityResult.contains(ConnectivityResult.mobile) ||
+                   connectivityResult.contains(ConnectivityResult.wifi);
+    });
 
-    if (isConnected) {
+    List<Map<String, dynamic>> modelsToShow = [];
+    if (_isConnected) {
+      debugPrint("Online: Fetching models from Firebase Storage...");
       try {
-        debugPrint("Online: Fetching models from Firestore...");
-        modelsToShow = await _fetchModelsFromFirestore();
+        modelsToShow = await _fetchModelsFromStorage();
+        final prefs = await SharedPreferences.getInstance();
         await prefs.setString('cached_models_list', jsonEncode(modelsToShow));
       } catch (e) {
-        debugPrint("Error fetching models from Firestore: $e. Attempting to use cache.");
-        modelsToShow = await _loadModelsFromCache(prefs);
+        debugPrint("Storage fetch failed, falling back to local discovery: $e");
+        modelsToShow = await _discoverLocalModels();
       }
-    } else { // Offline
-      debugPrint("Offline: Loading models from cache or checking local active model.");
-      modelsToShow = await _loadModelsFromCache(prefs);
-      if (modelsToShow.isEmpty) {
-        final Map<String, dynamic>? activeModelData = await _getLocallyActiveModelData(prefs);
-        if (activeModelData != null) {
-          modelsToShow = [activeModelData];
-          debugPrint("Offline: Using only locally available active model: ${activeModelData['name']}");
-        }
-      }
+    } else {
+      debugPrint("Offline: Scanning directory for local models.");
+      modelsToShow = await _discoverLocalModels();
     }
 
     if (!mounted) return;
@@ -150,122 +288,74 @@ class _DetectionScreenState extends State<DetectionScreen> {
     });
 
     if (_availableModels.isNotEmpty) {
-      await _autoLoadLastUsedModel();
+      await _updateLocalModelStatus();
+      await _loadInitialModel();
     } else {
+      setState(() { _isLoading = false; _loadingMessage = null; });
       if (mounted) {
-        setState(() {
-          _isLoading = false;
-          _loadingMessage = null;
-        });
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-              content: Text(isConnected
-                  ? "No models found. Please check Firebase configuration."
-                  : "Offline. No models available.")),
+            content: Text(_isConnected
+                ? "No models found in Firebase Storage."
+                : "Offline. No models found on device."),
+          ),
         );
       }
     }
   }
-
-  Future<List<Map<String, dynamic>>> _fetchModelsFromFirestore() async {
-    QuerySnapshot snapshot = await FirebaseFirestore.instance.collection('yoloModels').get();
-    return snapshot.docs.map((doc) {
-      final data = doc.data() as Map<String, dynamic>;
-      return <String, dynamic>{
-        'name': data['name'] as String,
-        'firebaseModelName': data['firebaseModelName'] as String,
-        'labelsAssetPath': data['labelsAssetPath'] as String,
-      };
-    }).toList();
-  }
-
-  Future<List<Map<String, dynamic>>> _loadModelsFromCache(SharedPreferences prefs) async {
-    String? cachedModelsJson = prefs.getString('cached_models_list');
-    if (cachedModelsJson != null) {
-      try {
-        List<dynamic> decodedList = jsonDecode(cachedModelsJson);
-        final models = decodedList.map((item) => item as Map<String, dynamic>).toList();
-        debugPrint("Loaded ${models.length} models from cache.");
-        return models;
-      } catch (e) {
-        debugPrint("Error decoding cached models: $e");
+  
+  Future<List<Map<String, dynamic>>> _fetchModelsFromStorage() async {
+    final List<Map<String, dynamic>> models = [];
+    try {
+      final listResult = await FirebaseStorage.instance.ref('yoloModels').listAll();
+      for (final prefix in listResult.prefixes) {
+        models.add({
+          'name': prefix.name,
+          'storagePath': prefix.fullPath,
+        });
       }
-    }
-    return [];
-  }
-
-  Future<Map<String, dynamic>?> _getLocallyActiveModelData(SharedPreferences prefs) async {
-    final lastModelDisplayName = prefs.getString(_prefsKeyLastModelName);
-    final lastFirebaseModelName = prefs.getString(_prefsKeyLastModelFirebaseName);
-
-    if (lastModelDisplayName != null && lastFirebaseModelName != null) {
-      // --- FIX: Pass the required 'lastFirebaseModelName' argument ---
-      final localModelPath = await _getLocalModelPath(lastFirebaseModelName); 
-
-      if (await File(localModelPath).exists()) {
-        return {
-          'name': lastModelDisplayName,
-          'firebaseModelName': lastFirebaseModelName,
-          'labelsAssetPath': 'assets/models/labels.txt', // Assuming a default path
-        };
-      }
-    }
-    return null;
-  }
-
-  Future<void> _autoLoadLastUsedModel() async {
-    final prefs = await SharedPreferences.getInstance();
-    final lastModelDisplayName = prefs.getString(_prefsKeyLastModelName);
-
-    if (lastModelDisplayName != null) {
-      final modelData = _availableModels.firstWhere(
-          (m) => m['name'] == lastModelDisplayName,
-          orElse: () => {});
-      
-      if (modelData.isNotEmpty) {
-        // Use the main prepare function for auto-loading
-        await _prepareAndLoadModel(modelData, isInitialLoad: true);
-      }
-    } else {
-      if (mounted) setState(() { _isLoading = false; _loadingMessage = null; });
+      debugPrint("Found ${models.length} models in Firebase Storage.");
+      return models;
+    } catch (e) {
+      debugPrint("Error fetching models from storage: $e");
+      return [];
     }
   }
 
-  Future<String> _getLocalModelPath(String firebaseModelName) async {
+
+  // --- REFACTORED: Path functions now just use the model display name ---
+  Future<String> _getLocalModelPath(String modelName) async {
     final docDir = await getApplicationDocumentsDirectory();
-    return p.join(docDir.path, "$firebaseModelName.tflite");
+    return p.join(docDir.path, "$modelName.tflite");
   }
 
-  Future<String> _getLocalLabelsPath(String firebaseModelName) async {
+  Future<String> _getLocalLabelsPath(String modelName) async {
     final docDir = await getApplicationDocumentsDirectory();
-    return p.join(docDir.path, "$firebaseModelName.txt");
+    return p.join(docDir.path, "$modelName.txt");
   }
-
-  Future<void> _downloadModel(String modelName, String firebaseModelName, String labelsAssetPath) async {
-    // No longer need to delete old files, as we're saving to a new unique file.
-    
+  
+  // --- REFACTORED: Downloads model and creates dummy labels file ---
+  Future<void> _downloadModel(String modelName, String storagePath) async {
     setState(() { _loadingMessage = "Downloading $modelName..."; });
-    final FirebaseModelDownloader modelDownloader = FirebaseModelDownloader.instance;
-    final FirebaseCustomModel downloadedModel = await modelDownloader.getModel(
-      firebaseModelName,
-      FirebaseModelDownloadType.latestModel,
-      FirebaseModelDownloadConditions(
-        iosAllowsCellularAccess: true,
-        androidWifiRequired: false,
-      ),
-    );
+    try {
+      final modelRef = FirebaseStorage.instance.ref('$storagePath/model.tflite');
+      final localModelFile = File(await _getLocalModelPath(modelName));
+      await modelRef.writeToFile(localModelFile);
+      debugPrint("Model '$modelName' downloaded to: ${localModelFile.path}");
 
-    // Get the unique path for this model
-    final targetLocalModelPath = await _getLocalModelPath(firebaseModelName);
-    await downloadedModel.file.copy(targetLocalModelPath);
-    debugPrint("Model '$firebaseModelName' downloaded to: $targetLocalModelPath");
-    
-    // Get the unique path for the labels
-    final targetLocalLabelsPath = await _getLocalLabelsPath(firebaseModelName);
-    final assetLabelsTempPath = await getAbsolutePath(labelsAssetPath);
-    await File(assetLabelsTempPath).copy(targetLocalLabelsPath);
-    debugPrint("Labels for '$firebaseModelName' copied to $targetLocalLabelsPath");
+      // Create a dummy local labels file, as it's required by the package
+      final localLabelsFile = File(await _getLocalLabelsPath(modelName));
+      if (!await localLabelsFile.exists()) {
+        await localLabelsFile.create();
+      }
+      debugPrint("Created dummy labels file for '$modelName'");
+
+    } catch (e) {
+      debugPrint("Error downloading model '$modelName': $e");
+      throw Exception("Failed to download model file for '$modelName'.");
+    }
   }
+
 
   void _clearScreen() {
     setState(() {
@@ -278,114 +368,131 @@ class _DetectionScreenState extends State<DetectionScreen> {
 
   @override
   void dispose() {
-    // It's crucial to dispose of the model when the screen is closed.
     _yoloModel?.dispose();
     super.dispose();
   }
+  
+  // --- REFACTORED: Local discovery is now simpler ---
+  Future<List<Map<String, dynamic>>> _discoverLocalModels() async {
+    debugPrint("Scanning local directory for models...");
+    final List<Map<String, dynamic>> foundModels = [];
+    final docDir = await getApplicationDocumentsDirectory();
+    final files = docDir.listSync();
 
-  Future<void> _prepareAndLoadModel(Map<String, dynamic> modelData, {bool isInitialLoad = false}) async {
-    if (!isInitialLoad) {
-      _clearScreen();
+    final modelFiles = files.where((f) => f.path.endsWith('.tflite')).toList();
+
+    for (final modelFile in modelFiles) {
+        final modelName = p.basenameWithoutExtension(modelFile.path);
+        final labelsPath = p.join(docDir.path, "$modelName.txt");
+
+        if (await File(labelsPath).exists()) {
+            debugPrint("--> Found local model: $modelName");
+            foundModels.add({
+                'name': modelName,
+                // In offline mode, the storage path isn't relevant, but we keep the structure consistent.
+                'storagePath': 'yoloModels/$modelName', 
+            });
+        }
     }
+    debugPrint("Discovered ${foundModels.length} models locally.");
+    return foundModels;
+  }
+
+  // --- REFACTORED: `_prepareAndLoadModel` to provide a valid labels path ---
+  Future<void> _prepareAndLoadModel(Map<String, dynamic> modelData, {bool isInitialLoad = false}) async {
+    if (!isInitialLoad) _clearScreen();
     setState(() { _isModelLoadedFromCache = false; });
 
-    final String modelNameDisplay = modelData['name'] as String;
-    final String firebaseModelName = modelData['firebaseModelName'] as String;
-    final String labelsAssetPath = modelData['labelsAssetPath'] as String;
+    final String modelName = modelData['name'] as String;
+    final String storagePath = modelData['storagePath'] as String;
 
     if (!mounted) return;
     setState(() {
       _isLoading = true;
-      _loadingMessage = "Preparing model: $modelNameDisplay";
+      _loadingMessage = "Preparing model: $modelName";
     });
 
     try {
-      final String targetModelPath = await _getLocalModelPath(firebaseModelName);
+      final String targetModelPath = await _getLocalModelPath(modelName);
       final modelFile = File(targetModelPath);
       bool loadedFromCache = false;
 
       if (!await modelFile.exists()) {
-        debugPrint("Local file for '$modelNameDisplay' not found. Downloading...");
-        await _downloadModel(modelNameDisplay, firebaseModelName, labelsAssetPath);
+        debugPrint("Local file for '$modelName' not found. Downloading...");
+        await _downloadModel(modelName, storagePath);
         loadedFromCache = false;
       } else {
-        debugPrint("Found local model for '$modelNameDisplay'. Loading from cache.");
+        debugPrint("Found local model for '$modelName'. Loading from cache.");
         loadedFromCache = true;
       }
 
-      setState(() { _loadingMessage = "Loading $modelNameDisplay into memory..."; });
-      
-      // --- NEW DISPOSE AND RE-CREATE LOGIC ---
-      // If a model instance already exists, dispose of it first to free up resources.
+      setState(() { _loadingMessage = "Loading $modelName into memory..."; });
+
       if (_yoloModel != null) {
-        debugPrint("Disposing previous model instance...");
         await _yoloModel!.dispose();
       }
 
-      // Always create a new instance for the selected model.
-      debugPrint("Initializing new YOLO instance for '$modelNameDisplay'...");
       _yoloModel = YOLO(
         modelPath: targetModelPath,
         task: YOLOTask.segment,
       );
       await _yoloModel?.loadModel();
-      // --- END NEW LOGIC ---
 
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_prefsKeyLastModelName, modelNameDisplay);
-      await prefs.setString(_prefsKeyLastModelFirebaseName, firebaseModelName);
+      await prefs.setString(_prefsKeyLastModelName, modelName);
 
       if (!mounted) return;
       setState(() {
-        _selectedModelName = modelNameDisplay;
+        _selectedModelName = modelName;
         _currentModelPath = targetModelPath;
         _isModelLoadedFromCache = loadedFromCache;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("$modelNameDisplay ready.")),
-      );
+      
+      final String message = loadedFromCache ? "'$modelName' loaded from cache." : "'$modelName' downloaded successfully.";
+      final IconData icon = loadedFromCache ? Icons.storage_rounded : Icons.cloud_download_rounded;
+      final Color backgroundColor = loadedFromCache ? Colors.green.shade700 : Colors.blue.shade700;
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Row(children: [Icon(icon, color: Colors.white), const SizedBox(width: 12), Expanded(child: Text(message))]), backgroundColor: backgroundColor),
+        );
+        await _updateLocalModelStatus();
+      }
 
     } catch (e) {
       debugPrint("Error in _prepareAndLoadModel: $e");
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Failed to load model: ${e.toString()}")),
+           SnackBar(content: Text("Failed to load model: ${e.toString()}"), backgroundColor: Colors.red.shade700),
         );
         setState(() {
           _yoloModel = null;
           _currentModelPath = null;
-          _isModelLoadedFromCache = false;
+          _selectedModelName = null;
         });
       }
     } finally {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-          _loadingMessage = null;
-        });
-      }
+      if (mounted) { setState(() { _isLoading = false; _loadingMessage = null; }); }
     }
   }
 
+  // --- REFACTORED: Deletion now uses the model name to find files ---
   Future<void> _deleteLocallyStoredModel() async {
-    if (_yoloModel == null || _selectedModelName == null) return;
+    if (_selectedModelName == null) return;
 
-    final modelToDelete = _availableModels.firstWhere((m) => m['name'] == _selectedModelName);
-    final firebaseModelName = modelToDelete['firebaseModelName'];
+    final modelNameToDelete = _selectedModelName!;
     
-    setState(() { /* ... loading state ... */ });
-
     // Delete the specific files for this model
-    final modelFile = File(await _getLocalModelPath(firebaseModelName));
-    final labelsFile = File(await _getLocalLabelsPath(firebaseModelName));
+    final modelFile = File(await _getLocalModelPath(modelNameToDelete));
+    final labelsFile = File(await _getLocalLabelsPath(modelNameToDelete));
+
     if (await modelFile.exists()) await modelFile.delete();
     if (await labelsFile.exists()) await labelsFile.delete();
 
     // Clear SharedPreferences if the deleted model was the last used one
     final prefs = await SharedPreferences.getInstance();
-    if (prefs.getString(_prefsKeyLastModelFirebaseName) == firebaseModelName) {
+    if (prefs.getString(_prefsKeyLastModelName) == modelNameToDelete) {
       await prefs.remove(_prefsKeyLastModelName);
-      await prefs.remove(_prefsKeyLastModelFirebaseName);
     }
 
     _clearScreen();
@@ -394,78 +501,156 @@ class _DetectionScreenState extends State<DetectionScreen> {
       _currentModelPath = null;
       _selectedModelName = null;
       _isModelLoadedFromCache = false;
-      _isLoading = false;
-      _loadingMessage = null;
+      // Remove from the set of downloaded models to update the UI icon
+      _downloadedModelNames.remove(modelNameToDelete);
     });
 
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text("Local model '${modelToDelete['name']}' has been deleted.")),
+      SnackBar(content: Text("Local cache for '$modelNameToDelete' has been deleted.")),
     );
   }
 
+  // --- REFACTORED: UI now conditionally shows the upload section ---
   Widget _buildModelManagementSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: DropdownButtonFormField<String>(
-                decoration: const InputDecoration(
-                  labelText: "Select Model",
-                  border: OutlineInputBorder(),
-                ),
-                hint: const Text("Select a Model to Load"),
-                value: _selectedModelName,
-                isExpanded: true,
-                items: _availableModels.map((model) {
-                  return DropdownMenuItem<String>(
-                    value: model['name'] as String?,
-                    child: Text(model['name'] as String? ?? "Unnamed Model"),
-                  );
-                }).toList(),
-                onChanged: _isLoading ? null : (String? newValue) {
-                  if (newValue != null) {
-                    final selectedModelData =
-                        _availableModels.firstWhere((m) => m['name'] == newValue, orElse: () => {});
-                    if (selectedModelData.isNotEmpty) {
-                      _prepareAndLoadModel(selectedModelData);
-                    }
-                  }
-                },
-              ),
-            ),
-            // Add the delete button, only visible when a model is loaded
-            if (_yoloModel != null && !_isLoading)
-              IconButton(
-                icon: const Icon(Icons.delete_outline, color: Colors.red),
-                tooltip: "Delete Local Model Cache",
-                onPressed: _deleteLocallyStoredModel,
-              ),
-          ],
-        ),
-        // Add the status indicator, only visible when a model is loaded
-        if (_yoloModel != null)
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      margin: EdgeInsets.zero,
+      child: ExpansionTile(
+        title: const Text("Model Management", style: TextStyle(fontWeight: FontWeight.bold)),
+        subtitle: Text(_selectedModelName ?? "No model selected"),
+        initiallyExpanded: _yoloModel == null,
+        children: [
           Padding(
-            padding: const EdgeInsets.only(top: 8.0),
-            child: Row(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(
-                  _isModelLoadedFromCache ? Icons.storage_rounded : Icons.cloud_download_rounded,
-                  color: Colors.grey.shade600,
-                  size: 16,
-                ),
-                const SizedBox(width: 4),
-                Text(
-                  _isModelLoadedFromCache ? "Status: Loaded from Local Cache" : "Status: Freshly Downloaded",
-                  style: TextStyle(color: Colors.grey.shade600, fontStyle: FontStyle.italic),
-                ),
+                const Text("Select & Load Model", style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 8),
+                _buildModelSelector(),
+                if (_yoloModel != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 12.0),
+                    child: Row(
+                      children: [
+                        Icon(Icons.check_circle, color: Colors.green.shade700, size: 18),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text("'$_selectedModelName' is loaded.", style: TextStyle(color: Colors.green.shade800))),
+                        if (_isModelLoadedFromCache)
+                          IconButton(
+                            icon: const Icon(Icons.delete_sweep_outlined, color: Colors.orange),
+                            onPressed: () => _showDeleteConfirmation(),
+                          ),
+                      ],
+                    ),
+                  ),
+                
+                // +++ Conditionally render the upload section based on connectivity +++
+                if (_isConnected) ...[
+                  const Divider(height: 32),
+                  const Text("Upload New Model", style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _modelNameController,
+                    decoration: const InputDecoration(
+                      labelText: "New Model Unique Name",
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.attach_file),
+                    label: Text(_selectedTfliteFileName ?? "Select .tflite File"),
+                    onPressed: _selectTfliteFile,
+                    style: OutlinedButton.styleFrom(
+                      minimumSize: const Size(double.infinity, 45),
+                      foregroundColor: _selectedTfliteFileName != null ? Colors.green : Theme.of(context).primaryColor,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      icon: const Icon(Icons.cloud_upload_outlined),
+                      label: const Text("Upload to Firebase"),
+                      onPressed: _isUploadingModel ? null : _uploadModel,
+                      style: ElevatedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        backgroundColor: Theme.of(context).primaryColor,
+                        foregroundColor: Colors.white,
+                      ),
+                    ),
+                  ),
+                ]
               ],
             ),
           ),
-      ],
+        ],
+      ),
     );
   }
+
+  // Helper method for delete confirmation dialog
+  void _showDeleteConfirmation() {
+    showDialog(context: context, builder: (ctx) => AlertDialog(
+      title: const Text("Confirm Deletion"),
+      content: Text("Are you sure you want to delete the local files for '$_selectedModelName'? You can re-download it later if you're online."),
+      actions: [
+        TextButton(child: const Text("Cancel"), onPressed: () => Navigator.of(ctx).pop()),
+        TextButton(child: const Text("Delete"), style: TextButton.styleFrom(foregroundColor: Colors.red), onPressed: () {
+          Navigator.of(ctx).pop();
+          _deleteLocallyStoredModel();
+        }),
+      ],
+    ));
+  }
+  
+  
+  // --- REFACTORED: `_buildModelSelector` now indicates downloaded models with an icon ---
+  Widget _buildModelSelector() {
+      if (_isFetchingModelList && _availableModels.isEmpty) {
+          return const Center(child: Text("Fetching model list..."));
+      }
+      if (_availableModels.isEmpty && !_isFetchingModelList) {
+          return const Center(child: Text("No models available. Pull down to refresh or upload a new one."));
+      }
+
+      return DropdownButtonFormField<String>(
+          decoration: const InputDecoration(
+              labelText: "Available Models",
+              border: OutlineInputBorder(),
+          ),
+          hint: const Text("Select a Model"),
+          value: _selectedModelName,
+          isExpanded: true,
+          items: _availableModels.map((model) {
+              final modelName = model['name'] as String;
+              final isDownloaded = _downloadedModelNames.contains(modelName);
+              return DropdownMenuItem<String>(
+                  value: modelName,
+                  child: Row(
+                    children: [
+                      Expanded(child: Text(modelName)),
+                      if (isDownloaded)
+                        const Icon(Icons.download_done, color: Colors.green, size: 20)
+                      else
+                        const Icon(Icons.cloud_outlined, color: Colors.grey, size: 20),
+                    ],
+                  ),
+              );
+          }).toList(),
+          onChanged: _isLoading ? null : (String? newValue) {
+              if (newValue != null && newValue != _selectedModelName) {
+                  final selectedModelData = _availableModels.firstWhere((m) => m['name'] == newValue);
+                  _prepareAndLoadModel(selectedModelData);
+              }
+          },
+      );
+  }
+
+  // --- All other methods from this point on can remain largely the same ---
+  // --- They handle image picking, segmentation, and UI building for results, ---
+  // --- which are not directly affected by the model source change. ---
 
   Future<void> _pickImage() async {
     final ImagePicker picker = ImagePicker();
@@ -496,7 +681,6 @@ class _DetectionScreenState extends State<DetectionScreen> {
     }
   }
 
-  // Add this helper function inside your _DetectionScreenState class
   void _prettyPrintMap(dynamic data, {String indent = ''}) {
     if (data is Map) {
       data.forEach((key, value) {
@@ -515,7 +699,6 @@ class _DetectionScreenState extends State<DetectionScreen> {
         debugPrint('$indent- Empty List');
         return;
       }
-      // Only print details for the first item of a list to avoid flooding the console
       debugPrint('$indent[ ... ${data.length} items ... ]');
       debugPrint('$indent  First item:');
       _prettyPrintMap(data.first, indent: '$indent    ');
@@ -526,79 +709,81 @@ class _DetectionScreenState extends State<DetectionScreen> {
   }
 
   Future<void> _runSegmentation() async {
-    if (_imageFile == null || _yoloModel == null) return;
-
-    setState(() {
-      _isLoading = true;
-      _loadingMessage = "Analyzing image...";
-    });
-
-    try {
-      final imageBytes = await _imageFile!.readAsBytes();
-      final double confThreshold = 0.5;
-      final double nmsThreshold = 0.5;
-
-      debugPrint("Running segmentation with confidence: $confThreshold, IoU: $nmsThreshold");
-
-      // --- NEW DEBUG LINE ADDED HERE ---
-      debugPrint("--> Using model for prediction: '$_selectedModelName'");
-
-      final detections = await _yoloModel!.predict(
-        imageBytes,
-        confidenceThreshold: confThreshold,
-        iouThreshold: nmsThreshold,
-      );
-
-      // ===================================================================
-      // ============= COMPREHENSIVE DEBUG OUTPUT STARTS HERE =============
-      // ===================================================================
-      debugPrint("----------------------------------------------------");
-      debugPrint("--- Comprehensive Detections Map Structure ---");
-      _prettyPrintMap(detections);
-      debugPrint("----------------------------------------------------");
-      // ===================================================================
-      // ============== COMPREHENSIVE DEBUG OUTPUT ENDS HERE ==============
-      // ===================================================================
-
-      if (!mounted) return;
-
-      final List<dynamic> boxes = detections['boxes'] ?? [];
-      
-      final List<Map<String, dynamic>> formattedRecognitions = [];
-      for (int i = 0; i < boxes.length; i++) {
-        final box = boxes[i];
-        formattedRecognitions.add({
-          'x1': box['x1'],
-          'y1': box['y1'],
-          'x2': box['x2'],
-          'y2': box['y2'],
-          'className': box['className'],
-          'confidence': box['confidence'],
-        });
-      }
+      if (_imageFile == null || _yoloModel == null) return;
 
       setState(() {
-        _recognitions = formattedRecognitions;
-        _maskPngBytes = detections['maskPng']; 
-        _annotatedImageBytes = detections['annotatedImage']; 
+        _isLoading = true;
+        _loadingMessage = "Analyzing image...";
+        _classColorMap = {}; // Clear previous colors
       });
 
-    } catch (e) {
-      debugPrint("Error running segmentation: $e");
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Error during analysis: $e")),
+      try {
+        final imageBytes = await _imageFile!.readAsBytes();
+        final double confThreshold = 0.5;
+        final double nmsThreshold = 0.5;
+
+        debugPrint("Running segmentation with confidence: $confThreshold, IoU: $nmsThreshold");
+        debugPrint("--> Using model for prediction: '$_selectedModelName'");
+
+        final detections = await _yoloModel!.predict(
+          imageBytes,
+          confidenceThreshold: confThreshold,
+          iouThreshold: nmsThreshold,
         );
-      }
-    } finally {
-      if (mounted) {
+
+        debugPrint("--- Comprehensive Detections Map Structure ---");
+        _prettyPrintMap(detections);
+        debugPrint("----------------------------------------------------");
+
+        if (!mounted) return;
+
+        final List<dynamic> boxes = detections['boxes'] ?? [];
+        
+        final List<Map<String, dynamic>> formattedRecognitions = [];
+      int colorIndex = 0;
+      final tempColorMap = <String, Color>{};
+
+        for (int i = 0; i < boxes.length; i++) {
+          final box = boxes[i];
+        final className = box['className'];
+          formattedRecognitions.add({
+              'x1': box['x1'],
+              'y1': box['y1'],
+              'x2': box['x2'],
+              'y2': box['y2'],
+              'className': className,
+              'confidence': box['confidence'],
+          });
+
+        if (!tempColorMap.containsKey(className)) {
+          tempColorMap[className] = _boxColors[colorIndex % _boxColors.length];
+          colorIndex++;
+        }
+        }
+
         setState(() {
-          _isLoading = false;
-          _loadingMessage = null;
+          _recognitions = formattedRecognitions;
+        _classColorMap = tempColorMap; 
+          _maskPngBytes = detections['maskPng'];
+          _annotatedImageBytes = detections['annotatedImage'];
         });
+
+      } catch (e) {
+        debugPrint("Error running segmentation: $e");
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text("Error during analysis: $e")),
+          );
+        }
+      } finally {
+        if (mounted) {
+          setState(() {
+              _isLoading = false;
+              _loadingMessage = null;
+          });
+        }
       }
     }
-  }
 
   Future<void> _handleRefresh() async {
     debugPrint("Screen refresh triggered.");
@@ -662,7 +847,7 @@ class _DetectionScreenState extends State<DetectionScreen> {
             mainAxisSize: MainAxisSize.min,
             children: [
               // Ensure you have a 'loading.gif' in an 'assets/images/' directory
-              Image.asset( 
+              Image.asset(
                 'assets/images/loading.gif',
                 width: 120,
                 height: 120,
@@ -729,7 +914,6 @@ class _DetectionScreenState extends State<DetectionScreen> {
     );
   }
 
-  // Add this new helper method to build the interactive controls panel
   Widget _buildInteractiveControls() {
   return Card(
     elevation: 2,
@@ -772,7 +956,6 @@ class _DetectionScreenState extends State<DetectionScreen> {
   );
 }
 
-  // Add this new helper widget for the "No Detections" case
   Widget _buildNoDetectionsFound() {
     return Stack(
       alignment: Alignment.center,
@@ -790,41 +973,6 @@ class _DetectionScreenState extends State<DetectionScreen> {
     );
   }
   
-  Widget _buildModelSelector() {
-    if (_isFetchingModelList && _availableModels.isEmpty) {
-      return const Center(child: Text("Fetching model list..."));
-    }
-    if (_availableModels.isEmpty && !_isFetchingModelList) {
-      return const Center(child: Text("No models available to select."));
-    }
-
-    return DropdownButtonFormField<String>(
-      decoration: const InputDecoration(
-        labelText: "Select Model",
-        border: OutlineInputBorder(),
-      ),
-      hint: const Text("Select a Model to Load"),
-      value: _selectedModelName,
-      isExpanded: true,
-      items: _availableModels.map((model) {
-        return DropdownMenuItem<String>(
-          value: model['name'] as String?,
-          child: Text(model['name'] as String? ?? "Unnamed Model"),
-        );
-      }).toList(),
-      onChanged: _isLoading ? null : (String? newValue) {
-        if (newValue != null) {
-          final selectedModelData =
-              _availableModels.firstWhere((m) => m['name'] == newValue, orElse: () => {});
-          if (selectedModelData.isNotEmpty) {
-            _prepareAndLoadModel(selectedModelData);
-          }
-        }
-      },
-    );
-  }
-
-  // This method builds the main results image view
   Widget _buildResultsImage() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -837,14 +985,13 @@ class _DetectionScreenState extends State<DetectionScreen> {
           clipBehavior: Clip.antiAlias,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
           child: _recognitions.isEmpty && !_isLoading
-              ? Center(child: Text("No detections found.")) // Simplified fallback
+              ? _buildNoDetectionsFound() 
               : _buildImageWithDetections(),
         ),
       ],
     );
   }
 
-  // This method builds the interactive list and controls
   Widget _buildResultsList() {
     return Column(
       children: [
@@ -877,8 +1024,8 @@ class _DetectionScreenState extends State<DetectionScreen> {
 
     // Fallback for models that might not produce a mask PNG
     if (_maskPngBytes == null) {
-      return _recognitions.isNotEmpty 
-        ? _buildImageWithBoxesOnly() 
+      return _recognitions.isNotEmpty
+        ? _buildImageWithBoxesOnly()
         : Image.file(_imageFile!);
     }
 
@@ -946,12 +1093,9 @@ class _DetectionScreenState extends State<DetectionScreen> {
                 recognitions: _recognitions,
                 boxColors: _boxColors,
                 scaleRatio: scaleRatio,
-                // --- FIX START: Add the missing interactive parameters ---
                 showMasks: _showMasks,
                 maskOpacity: _maskOpacity,
                 selectedDetectionIndex: _selectedDetectionIndex,
-                // The `maskImage` is intentionally left null for "boxes only" mode.
-                // --- FIX END ---
               ),
             );
           },
@@ -979,34 +1123,86 @@ class _DetectionScreenState extends State<DetectionScreen> {
       physics: const NeverScrollableScrollPhysics(),
       itemCount: _recognitions.length,
       itemBuilder: (context, index) {
-        final detection = _recognitions[index];
-        final className = detection['className'] ?? 'Unknown';
-        final confidence = (detection['confidence'] as num).toDouble();
-        final isSelected = _selectedDetectionIndex == index;
+      final detection = _recognitions[index];
+      final className = detection['className'] ?? 'Unknown';
+      final confidence = (detection['confidence'] as num).toDouble();
+      final isSelected = _selectedDetectionIndex == index;
+          
+      final itemColor = _classColorMap[className] ?? Colors.grey.shade700;
 
-        return Card(
-          elevation: isSelected ? 4 : 2,
-          color: isSelected ? Theme.of(context).primaryColor.withOpacity(0.1) : null,
+      return Card(
+          margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+          elevation: isSelected ? 6 : 2,
+          shadowColor: isSelected ? itemColor.withOpacity(0.5) : Colors.black.withOpacity(0.1),
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(10),
-            side: isSelected 
-              ? BorderSide(color: Theme.of(context).primaryColor, width: 2) 
-              : BorderSide.none,
+          borderRadius: BorderRadius.circular(12),
+          side: isSelected
+              ? BorderSide(color: itemColor, width: 2.5)
+              : BorderSide(color: Colors.grey.shade300, width: 1),
           ),
-          child: ListTile(
-            leading: CircleAvatar(child: Text('${index + 1}')),
-            title: Text(className),
-            subtitle: Text('Confidence: ${(confidence * 100).toStringAsFixed(1)}%'),
-            onTap: () {
+          child: InkWell( // Use InkWell for a nice ripple effect on tap
+          borderRadius: BorderRadius.circular(12),
+          onTap: () {
               setState(() {
-                // Toggle selection
                 _selectedDetectionIndex = isSelected ? null : index;
               });
-            },
+          },
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              child: Row(
+                children: [
+                  Container(
+                    width: 40,
+                    height: 40,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: itemColor.withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: itemColor, width: 1.5)
+                    ),
+                    child: Text(
+                      '${index + 1}',
+                      style: TextStyle(
+                        color: itemColor,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          className,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 17,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Chip(
+                          label: Text(
+                            '${(confidence * 100).toStringAsFixed(1)}% Confidence',
+                            style: TextStyle(color: Colors.grey.shade800, fontWeight: FontWeight.w500),
+                          ),
+                          backgroundColor: Colors.grey.shade200,
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
+                          side: BorderSide(color: Colors.grey.shade300),
+                        )
+                      ],
+                    ),
+                  ),
+                  if (isSelected)
+                    Icon(Icons.check_circle, color: itemColor),
+                ],
+              ),
+            ),
           ),
-        );
+      );
       },
-    );
+      );
   }
 }
 
@@ -1016,7 +1212,6 @@ class _DetectionPainter extends CustomPainter {
   final List<Map<String, dynamic>> recognitions;
   final List<Color> boxColors;
   final double scaleRatio;
-  // New properties for interactivity
   final bool showMasks;
   final double maskOpacity;
   final int? selectedDetectionIndex;
@@ -1027,7 +1222,6 @@ class _DetectionPainter extends CustomPainter {
     required this.recognitions,
     required this.boxColors,
     required this.scaleRatio,
-    // Add new properties to constructor
     required this.showMasks,
     required this.maskOpacity,
     this.selectedDetectionIndex,
@@ -1035,7 +1229,6 @@ class _DetectionPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    // 1. Draw the original background image
     paintImage(
       canvas: canvas,
       rect: Rect.fromLTWH(0, 0, size.width, size.height),
@@ -1043,20 +1236,32 @@ class _DetectionPainter extends CustomPainter {
       fit: BoxFit.fill,
     );
 
-    // 2. Selectively draw the mask PNG using clipping
     if (showMasks && maskImage != null && recognitions.isNotEmpty) {
       final stencilPath = Path();
-      for (final detection in recognitions) {
-        final double x1 = (detection['x1'] as num).toDouble() * scaleRatio;
-        final double y1 = (detection['y1'] as num).toDouble() * scaleRatio;
-        final double x2 = (detection['x2'] as num).toDouble() * scaleRatio;
-        final double y2 = (detection['y2'] as num).toDouble() * scaleRatio;
-        stencilPath.addRect(Rect.fromLTRB(x1, y1, x2, y2));
+      // Logic to highlight only the selected mask
+      if (selectedDetectionIndex != null) {
+          final detection = recognitions[selectedDetectionIndex!];
+          final rect = Rect.fromLTRB(
+              (detection['x1'] as num) * scaleRatio,
+              (detection['y1'] as num) * scaleRatio,
+              (detection['x2'] as num) * scaleRatio,
+              (detection['y2'] as num) * scaleRatio,
+          );
+          stencilPath.addRect(rect);
+      } else { // Or show all masks
+          for (final detection in recognitions) {
+              final rect = Rect.fromLTRB(
+                  (detection['x1'] as num) * scaleRatio,
+                  (detection['y1'] as num) * scaleRatio,
+                  (detection['x2'] as num) * scaleRatio,
+                  (detection['y2'] as num) * scaleRatio,
+              );
+              stencilPath.addRect(rect);
+          }
       }
       
       canvas.save();
       canvas.clipPath(stencilPath);
-      // Use the Opacity value from the slider
       final maskPaint = Paint()..color = Colors.white.withOpacity(maskOpacity);
       canvas.drawImageRect(
           maskImage!,
@@ -1067,9 +1272,6 @@ class _DetectionPainter extends CustomPainter {
       canvas.restore();
     }
 
-    // --- 3. DRAW BOUNDING BOXES AND LABELS WITH CLASS-BASED COLORS ---
-    
-     // 3. Draw the bounding box outlines and labels
     final Map<String, Color> classColorMap = {};
     int colorIndex = 0;
 
@@ -1090,14 +1292,12 @@ class _DetectionPainter extends CustomPainter {
       final double y2 = (detection['y2'] as num).toDouble() * scaleRatio;
       final double confidence = (detection['confidence'] as num).toDouble();
 
-      // Draw bounding box outline
       final boxPaint = Paint()
         ..color = color
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 2.5;
+        ..strokeWidth = isSelected ? 4.0 : 2.5; // Highlight selected box
       canvas.drawRect(Rect.fromLTRB(x1, y1, x2, y2), boxPaint);
 
-      // Draw label
       final textPainter = TextPainter(
         text: TextSpan(
           text: '$className (${(confidence * 100).toStringAsFixed(1)}%)',
@@ -1105,35 +1305,42 @@ class _DetectionPainter extends CustomPainter {
             color: Colors.white,
             fontSize: 14,
             fontWeight: FontWeight.bold,
+            shadows: [Shadow(color: Colors.black, blurRadius: 4)]
           ),
         ),
         textDirection: TextDirection.ltr,
       );
       textPainter.layout(minWidth: 0, maxWidth: size.width);
 
-      // Draw a padded background for the label
-      final labelBackgroundPaint = Paint()..color = color;
+      final labelBackgroundPaint = Paint()..color = color.withOpacity(isSelected ? 1.0 : 0.8);
       final labelRect = Rect.fromLTWH(
-        x1, 
-        y1, 
+        x1,
+        y1 - (textPainter.height + 4), // Position label above the box
         textPainter.width + 8,
         textPainter.height + 4,
       );
-      canvas.drawRect(labelRect, labelBackgroundPaint);
       
-      // Draw the text on top of the background
-      textPainter.paint(canvas, Offset(x1 + 4, y1 + 2));
+      // Ensure label is within view bounds
+      double top = y1 - textPainter.height - 4;
+      if (top < 0) {
+        top = y2 + 2; // If no space above, place it below
+      }
+
+      final finalLabelRect = Rect.fromLTWH(x1, top, textPainter.width + 8, textPainter.height + 4);
+
+      canvas.drawRect(finalLabelRect, labelBackgroundPaint);
+      
+      textPainter.paint(canvas, Offset(x1 + 4, top + 2));
     }
   }
 
   @override
   bool shouldRepaint(covariant _DetectionPainter oldDelegate) {
-    // Update shouldRepaint to include the new interactive properties
     return originalImage != oldDelegate.originalImage ||
-           maskImage != oldDelegate.maskImage ||
-           recognitions != oldDelegate.recognitions ||
-           showMasks != oldDelegate.showMasks ||
-           maskOpacity != oldDelegate.maskOpacity ||
-           selectedDetectionIndex != oldDelegate.selectedDetectionIndex;
+            maskImage != oldDelegate.maskImage ||
+            recognitions != oldDelegate.recognitions ||
+            showMasks != oldDelegate.showMasks ||
+            maskOpacity != oldDelegate.maskOpacity ||
+            selectedDetectionIndex != oldDelegate.selectedDetectionIndex;
   }
 }

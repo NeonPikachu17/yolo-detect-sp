@@ -1,4 +1,0 @@
-CornFallArmyworm
-CornFallArmywormDamage
-CornPhaeosphaeriaLeafSpot
-CornNorthernLeafBlight
