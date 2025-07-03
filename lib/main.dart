@@ -1,27 +1,27 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'dart:math'; // +++ NEW: For random number generation
 import 'dart:typed_data';
-import 'dart:ui' as ui; // Needed for ui.decodeImageFromPixels
+import 'dart:ui' as ui;
+import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
+import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:ultralytics_yolo/ultralytics_yolo.dart';
-import 'package:path_provider/path_provider.dart';
+import 'package:lottie/lottie.dart';
 import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:connectivity_plus/connectivity_plus.dart';
-import 'dart:convert';
-// Add these imports to the top of your main.dart file
-import 'package:file_picker/file_picker.dart';
-import 'package:firebase_storage/firebase_storage.dart';
-
-
-import 'package:firebase_core/firebase_core.dart';
+import 'package:ultralytics_yolo/ultralytics_yolo.dart';
 import 'firebase_options.dart';
 
-// --- REFACTORED: Constants updated for clarity ---
 const String _prefsKeyLastModelName = "last_downloaded_model_name";
-// We only need the display name now, as it will be the unique identifier.
+// +++ NEW: Key for caching the model list +++
+const String _prefsKeyCachedModelList = "cached_models_list";
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -36,16 +36,50 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
     return MaterialApp(
       title: 'YOLO Detection App',
       theme: ThemeData(
-        primarySwatch: Colors.blue,
         useMaterial3: true,
+        primaryColor: const Color(0xFF006A6A),
+        scaffoldBackgroundColor: const Color(0xFFF0F4F4),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF006A6A),
+          brightness: Brightness.light,
+          primary: const Color(0xFF006A6A),
+          secondary: const Color(0xFF4A6363),
+          background: const Color(0xFFF0F4F4),
+          error: const Color(0xFFBA1A1A),
+        ),
+        textTheme: GoogleFonts.poppinsTextTheme(textTheme),
+        // --- CORRECTED: Use the proper CardTheme class ---
+        cardTheme: const CardThemeData(
+          elevation: 2,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.all(Radius.circular(16)),
+          ),
+          clipBehavior: Clip.antiAlias,
+          margin: EdgeInsets.zero,
+        ),
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 24),
+            textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+        ),
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Color(0xFFF0F4F4),
+          foregroundColor: Color(0xFF002020),
+          elevation: 0,
+          centerTitle: true,
+        ),
       ),
       home: const DetectionScreen(),
     );
   }
 }
+
 
 Future<String> getAbsolutePath(String assetPath) async {
   final tempDir = await getTemporaryDirectory();
@@ -62,6 +96,8 @@ Future<String> getAbsolutePath(String assetPath) async {
     throw Exception("Failed to copy asset: $assetPath");
   }
 }
+// +++ NEW: An enum to represent the different gacha outcomes +++
+enum LoaderType { regular, fourStar, standardFiveStar, limitedFiveStar }
 
 class DetectionScreen extends StatefulWidget {
   const DetectionScreen({super.key});
@@ -108,25 +144,153 @@ class _DetectionScreenState extends State<DetectionScreen> {
 
   List<Map<String, dynamic>> _availableModels = [];
   bool _isFetchingModelList = false;
+  late StreamSubscription<List<ConnectivityResult>> _connectivitySubscription;
+
+  // --- MODIFIED: Expanded state for the new gacha system ---
+  int _pityCounter5Star = 0;
+  int _pityCounter4Star = 0;
+  bool _is5050Guaranteed = false;
+  LoaderType _loaderType = LoaderType.regular;
+
 
   @override
   void initState() {
     super.initState();
+    _loadPity(); // +++ NEW: Load pity count on start
     _initializeScreenData();
+    _connectivitySubscription = Connectivity().onConnectivityChanged.listen(_updateConnectionStatus);
   }
 
-  // --- REFACTORED: This function now only selects .tflite files ---
+  // --- MODIFIED: Load and Save methods now handle both pity counters ---
+  Future<void> _loadPity() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _pityCounter5Star = prefs.getInt('pity_counter_5_star') ?? 0;
+      _pityCounter4Star = prefs.getInt('pity_counter_4_star') ?? 0;
+      _is5050Guaranteed = prefs.getBool('is_5050_guaranteed') ?? false;
+    });
+  }
+
+  Future<void> _savePity() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('pity_counter_5_star', _pityCounter5Star);
+    await prefs.setInt('pity_counter_4_star', _pityCounter4Star);
+    await prefs.setBool('is_5050_guaranteed', _is5050Guaranteed);
+  }
+
+   // --- MODIFIED: The complete HSR gacha simulation logic ---
+  void _startLoading(String message) {
+    if (mounted) {
+      _pityCounter5Star++;
+      _pityCounter4Star++;
+      debugPrint("5-Star Pity: $_pityCounter5Star | 4-Star Pity: $_pityCounter4Star | Guaranteed: $_is5050Guaranteed");
+
+      bool is5StarPull = false;
+      double baseRate5Star = 0.006;
+      double softPityIncrease = 0.06;
+
+      // 1. Check for 5-Star (Hard -> Soft -> Base)
+      if (_pityCounter5Star >= 90) is5StarPull = true;
+      else if (_pityCounter5Star > 73) {
+        if (Random().nextDouble() < baseRate5Star + (_pityCounter5Star - 73) * softPityIncrease) is5StarPull = true;
+      } else {
+        if (Random().nextDouble() < baseRate5Star) is5StarPull = true;
+      }
+      
+      LoaderType currentLoaderType = LoaderType.regular;
+      if (is5StarPull) {
+        debugPrint("⭐⭐⭐⭐⭐ 5-STAR PULLED AT PITY $_pityCounter5Star! ⭐⭐⭐⭐⭐");
+        if (_is5050Guaranteed || Random().nextBool()) {
+          debugPrint(">>> You won the 50/50! It's the LIMITED 5-STAR!");
+          currentLoaderType = LoaderType.limitedFiveStar;
+          _is5050Guaranteed = false;
+        } else {
+          debugPrint(">>> You lost the 50/50... It's a STANDARD 5-STAR. Next one is guaranteed!");
+          currentLoaderType = LoaderType.standardFiveStar;
+          _is5050Guaranteed = true;
+        }
+        _pityCounter5Star = 0;
+        _pityCounter4Star = 0; // Pity resets for 4-star too
+      } else {
+        // 2. If no 5-star, check for 4-Star
+        bool is4StarPull = false;
+        double baseRate4Star = 0.051; // 5.1% base rate
+
+        if (_pityCounter4Star >= 10) is4StarPull = true;
+        else if (Random().nextDouble() < baseRate4Star) is4StarPull = true;
+
+        if (is4StarPull) {
+          debugPrint("✨✨✨ 4-STAR PULLED AT PITY $_pityCounter4Star! ✨✨✨");
+          currentLoaderType = LoaderType.fourStar;
+          _pityCounter4Star = 0; // Reset 4-star pity
+        }
+      }
+
+      _savePity();
+
+      setState(() {
+        _loadingMessage = message;
+        _isLoading = true;
+        _loaderType = currentLoaderType;
+      });
+    }
+  }
+
+  void _stopLoading() {
+    if (mounted) {
+      setState(() {
+        _isLoading = false;
+        _loadingMessage = null;
+      });
+    }
+  }
+
+  // +++ NEW: Function to update connectivity state and show a snackbar +++
+  void _updateConnectionStatus(List<ConnectivityResult> results) {
+    final bool currentlyConnected = results.contains(ConnectivityResult.mobile) || results.contains(ConnectivityResult.wifi);
+    if (mounted && _isConnected != currentlyConnected) {
+      setState(() {
+        _isConnected = currentlyConnected;
+      });
+      final message = _isConnected ? "You are back online." : "You've gone offline. Functionality may be limited.";
+      final icon = _isConnected ? Icons.wifi_rounded : Icons.wifi_off_rounded;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
+          content: Row(children: [Icon(icon, color: Colors.white), const SizedBox(width: 12), Text(message)]),
+          backgroundColor: _isConnected ? Colors.green.shade700 : Colors.orange.shade800,
+        ));
+    }
+  }
+
+
+  // --- MODIFIED: This function now validates the file type after selection for better compatibility ---
   Future<void> _selectTfliteFile() async {
+    // We remove the filter to prevent platform errors on unsupported types.
     final result = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['tflite'],
+      type: FileType.any, // Allow any file type
     );
 
     if (result != null && result.files.single.path != null) {
-      setState(() {
-        _selectedTfliteFile = File(result.files.single.path!);
-        _selectedTfliteFileName = result.files.single.name;
-      });
+      final file = result.files.single;
+
+      // Manually check the extension after the file is picked.
+      if (file.extension?.toLowerCase() == 'tflite') {
+        setState(() {
+          _selectedTfliteFile = File(file.path!);
+          _selectedTfliteFileName = file.name;
+        });
+      } else {
+        // Show an error message if the wrong file type was selected.
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text("Invalid file type. Please select a .tflite model file."),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
     } else {
       debugPrint("No file selected.");
     }
@@ -249,36 +413,33 @@ class _DetectionScreenState extends State<DetectionScreen> {
     }
   }
   
-  // --- REFACTORED: Now checks connectivity and updates the UI state ---
+   // --- MODIFIED: Use the new _startLoading and _stopLoading methods ---
   Future<void> _initializeScreenData() async {
     if (!mounted) return;
-
-    setState(() {
-      _isFetchingModelList = true;
-      _isLoading = true;
-      _loadingMessage = "Checking for models...";
-    });
+    _startLoading("Checking for models...");
 
     final connectivityResult = await Connectivity().checkConnectivity();
-    setState(() {
-      _isConnected = connectivityResult.contains(ConnectivityResult.mobile) ||
-                   connectivityResult.contains(ConnectivityResult.wifi);
-    });
+    _isConnected = connectivityResult.contains(ConnectivityResult.mobile) || connectivityResult.contains(ConnectivityResult.wifi);
 
+    // ... (rest of the logic is the same)
     List<Map<String, dynamic>> modelsToShow = [];
     if (_isConnected) {
-      debugPrint("Online: Fetching models from Firebase Storage...");
+      debugPrint("Online: Attempting to fetch models from Firebase Storage...");
       try {
         modelsToShow = await _fetchModelsFromStorage();
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setString('cached_models_list', jsonEncode(modelsToShow));
+        await _cacheModelList(modelsToShow);
       } catch (e) {
-        debugPrint("Storage fetch failed, falling back to local discovery: $e");
-        modelsToShow = await _discoverLocalModels();
+        debugPrint("Firebase fetch failed, falling back to cache: $e");
+        modelsToShow = await _loadModelListFromCache();
       }
     } else {
-      debugPrint("Offline: Scanning directory for local models.");
-      modelsToShow = await _discoverLocalModels();
+      debugPrint("Offline: Loading models from local cache.");
+      modelsToShow = await _loadModelListFromCache();
+    }
+    
+    if (modelsToShow.isEmpty) {
+        debugPrint("No models from Firebase or cache. Discovering local files as a fallback.");
+        modelsToShow = await _discoverLocalModels();
     }
 
     if (!mounted) return;
@@ -291,7 +452,7 @@ class _DetectionScreenState extends State<DetectionScreen> {
       await _updateLocalModelStatus();
       await _loadInitialModel();
     } else {
-      setState(() { _isLoading = false; _loadingMessage = null; });
+      _stopLoading();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -302,6 +463,26 @@ class _DetectionScreenState extends State<DetectionScreen> {
         );
       }
     }
+  }
+
+  // +++ NEW: Caching function to save the model list +++
+  Future<void> _cacheModelList(List<Map<String, dynamic>> models) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_prefsKeyCachedModelList, jsonEncode(models));
+    debugPrint("Model list cached successfully.");
+  }
+
+  // +++ NEW: Caching function to load the model list from cache +++
+  Future<List<Map<String, dynamic>>> _loadModelListFromCache() async {
+    final prefs = await SharedPreferences.getInstance();
+    final cachedData = prefs.getString(_prefsKeyCachedModelList);
+    if (cachedData != null) {
+      final List<dynamic> decoded = jsonDecode(cachedData);
+      debugPrint("Loaded ${decoded.length} models from cache.");
+      return decoded.cast<Map<String, dynamic>>().toList();
+    }
+    debugPrint("No cached model list found.");
+    return [];
   }
   
   Future<List<Map<String, dynamic>>> _fetchModelsFromStorage() async {
@@ -369,6 +550,7 @@ class _DetectionScreenState extends State<DetectionScreen> {
   @override
   void dispose() {
     _yoloModel?.dispose();
+    _connectivitySubscription.cancel();
     super.dispose();
   }
   
@@ -463,7 +645,7 @@ class _DetectionScreenState extends State<DetectionScreen> {
       debugPrint("Error in _prepareAndLoadModel: $e");
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-           SnackBar(content: Text("Failed to load model: ${e.toString()}"), backgroundColor: Colors.red.shade700),
+            SnackBar(content: Text("Failed to load model: ${e.toString()}"), backgroundColor: Colors.red.shade700),
         );
         setState(() {
           _yoloModel = null;
@@ -510,23 +692,21 @@ class _DetectionScreenState extends State<DetectionScreen> {
     );
   }
 
-  // --- REFACTORED: UI now conditionally shows the upload section ---
+  // --- MODIFIED: Model management card with improved styling ---
   Widget _buildModelManagementSection() {
     return Card(
-      clipBehavior: Clip.antiAlias,
-      margin: EdgeInsets.zero,
       child: ExpansionTile(
+        key: const ValueKey('model-management'),
+        leading: Icon(Icons.hub_outlined, color: Theme.of(context).primaryColor),
         title: const Text("Model Management", style: TextStyle(fontWeight: FontWeight.bold)),
         subtitle: Text(_selectedModelName ?? "No model selected"),
         initiallyExpanded: _yoloModel == null,
         children: [
           Padding(
-            padding: const EdgeInsets.all(16.0),
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text("Select & Load Model", style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-                const SizedBox(height: 8),
                 _buildModelSelector(),
                 if (_yoloModel != null)
                   Padding(
@@ -539,49 +719,12 @@ class _DetectionScreenState extends State<DetectionScreen> {
                         if (_isModelLoadedFromCache)
                           IconButton(
                             icon: const Icon(Icons.delete_sweep_outlined, color: Colors.orange),
+                            tooltip: "Delete model from local cache",
                             onPressed: () => _showDeleteConfirmation(),
                           ),
                       ],
                     ),
                   ),
-                
-                // +++ Conditionally render the upload section based on connectivity +++
-                if (_isConnected) ...[
-                  const Divider(height: 32),
-                  const Text("Upload New Model", style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: _modelNameController,
-                    decoration: const InputDecoration(
-                      labelText: "New Model Unique Name",
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  OutlinedButton.icon(
-                    icon: const Icon(Icons.attach_file),
-                    label: Text(_selectedTfliteFileName ?? "Select .tflite File"),
-                    onPressed: _selectTfliteFile,
-                    style: OutlinedButton.styleFrom(
-                      minimumSize: const Size(double.infinity, 45),
-                      foregroundColor: _selectedTfliteFileName != null ? Colors.green : Theme.of(context).primaryColor,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton.icon(
-                      icon: const Icon(Icons.cloud_upload_outlined),
-                      label: const Text("Upload to Firebase"),
-                      onPressed: _isUploadingModel ? null : _uploadModel,
-                      style: ElevatedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        backgroundColor: Theme.of(context).primaryColor,
-                        foregroundColor: Colors.white,
-                      ),
-                    ),
-                  ),
-                ]
               ],
             ),
           ),
@@ -589,6 +732,56 @@ class _DetectionScreenState extends State<DetectionScreen> {
       ),
     );
   }
+  
+  // // --- MODIFIED: Upload section with improved styling ---
+  // Widget _buildUploadModelSection() {
+  //   if (!_isConnected) return const SizedBox.shrink();
+
+  //   return Card(
+  //     child: ExpansionTile(
+  //       key: const ValueKey('model-upload'),
+  //       leading: Icon(Icons.cloud_upload_outlined, color: Theme.of(context).colorScheme.secondary),
+  //       title: const Text("Upload New Model", style: TextStyle(fontWeight: FontWeight.bold)),
+  //       subtitle: const Text("Add a custom .tflite model"),
+  //       children: [
+  //         Padding(
+  //           padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+  //           child: Column(
+  //             crossAxisAlignment: CrossAxisAlignment.start,
+  //             children: [
+  //               TextField(
+  //                 controller: _modelNameController,
+  //                 decoration: const InputDecoration(
+  //                   labelText: "New Model Unique Name",
+  //                   border: OutlineInputBorder(),
+  //                 ),
+  //               ),
+  //               const SizedBox(height: 12),
+  //               OutlinedButton.icon(
+  //                 icon: const Icon(Icons.attach_file),
+  //                 label: Text(_selectedTfliteFileName ?? "Select .tflite File"),
+  //                 onPressed: _selectTfliteFile,
+  //                 style: OutlinedButton.styleFrom(
+  //                   minimumSize: const Size(double.infinity, 50),
+  //                   foregroundColor: _selectedTfliteFileName != null ? Colors.green : Theme.of(context).primaryColor,
+  //                 ),
+  //               ),
+  //               const SizedBox(height: 16),
+  //               SizedBox(
+  //                 width: double.infinity,
+  //                 child: ElevatedButton.icon(
+  //                   icon: const Icon(Icons.cloud_upload_outlined),
+  //                   label: const Text("Upload to Firebase"),
+  //                   onPressed: _isUploadingModel ? null : _uploadModel,
+  //                 ),
+  //               ),
+  //             ],
+  //           ),
+  //         ),
+  //       ],
+  //     ),
+  //   );
+  // }
 
   // Helper method for delete confirmation dialog
   void _showDeleteConfirmation() {
@@ -606,46 +799,66 @@ class _DetectionScreenState extends State<DetectionScreen> {
   }
   
   
-  // --- REFACTORED: `_buildModelSelector` now indicates downloaded models with an icon ---
+  // --- MODIFIED: Model selector dropdown with offline awareness ---
   Widget _buildModelSelector() {
-      if (_isFetchingModelList && _availableModels.isEmpty) {
-          return const Center(child: Text("Fetching model list..."));
-      }
-      if (_availableModels.isEmpty && !_isFetchingModelList) {
-          return const Center(child: Text("No models available. Pull down to refresh or upload a new one."));
-      }
+    if (_isFetchingModelList && _availableModels.isEmpty) {
+      return const Center(child: Text("Fetching model list..."));
+    }
+    if (_availableModels.isEmpty && !_isFetchingModelList) {
+      return Center(child: Text(
+        _isConnected ? "No models available. Pull down to refresh." : "Offline. No cached models found.",
+        textAlign: TextAlign.center,
+      ));
+    }
 
-      return DropdownButtonFormField<String>(
-          decoration: const InputDecoration(
-              labelText: "Available Models",
-              border: OutlineInputBorder(),
-          ),
-          hint: const Text("Select a Model"),
-          value: _selectedModelName,
-          isExpanded: true,
-          items: _availableModels.map((model) {
-              final modelName = model['name'] as String;
-              final isDownloaded = _downloadedModelNames.contains(modelName);
-              return DropdownMenuItem<String>(
-                  value: modelName,
-                  child: Row(
-                    children: [
-                      Expanded(child: Text(modelName)),
-                      if (isDownloaded)
-                        const Icon(Icons.download_done, color: Colors.green, size: 20)
-                      else
-                        const Icon(Icons.cloud_outlined, color: Colors.grey, size: 20),
-                    ],
+    return DropdownButtonFormField<String>(
+      decoration: const InputDecoration(
+        labelText: "Available Models",
+        border: OutlineInputBorder(),
+      ),
+      hint: const Text("Select a Model"),
+      value: _selectedModelName,
+      isExpanded: true,
+      items: _availableModels.map((model) {
+        final modelName = model['name'] as String;
+        final isDownloaded = _downloadedModelNames.contains(modelName);
+        // +++ NEW: An item is only selectable if it's downloaded OR if the user is online +++
+        final bool isSelectable = isDownloaded || _isConnected;
+
+        return DropdownMenuItem<String>(
+          value: modelName,
+          // Disable selection for non-downloaded models when offline
+          enabled: isSelectable,
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  modelName,
+                  style: TextStyle(
+                    // Visually grey out non-selectable items
+                    color: isSelectable ? null : Colors.grey.shade500,
                   ),
-              );
-          }).toList(),
-          onChanged: _isLoading ? null : (String? newValue) {
-              if (newValue != null && newValue != _selectedModelName) {
-                  final selectedModelData = _availableModels.firstWhere((m) => m['name'] == newValue);
-                  _prepareAndLoadModel(selectedModelData);
-              }
-          },
-      );
+                ),
+              ),
+              if (isDownloaded)
+                const Icon(Icons.download_done, color: Colors.green, size: 20)
+              else
+                Icon(
+                  Icons.cloud_outlined, 
+                  color: isSelectable ? Colors.grey : Colors.grey.shade400, 
+                  size: 20
+                ),
+            ],
+          ),
+        );
+      }).toList(),
+      onChanged: _isLoading ? null : (String? newValue) {
+        if (newValue != null && newValue != _selectedModelName) {
+          final selectedModelData = _availableModels.firstWhere((m) => m['name'] == newValue);
+          _prepareAndLoadModel(selectedModelData);
+        }
+      },
+    );
   }
 
   // --- All other methods from this point on can remain largely the same ---
@@ -791,77 +1004,143 @@ class _DetectionScreenState extends State<DetectionScreen> {
     await _initializeScreenData();
   }
 
+  // --- MODIFIED: Main build method for new layout ---
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Pest Detection"),
-        centerTitle: true,
-        elevation: 2,
+        title: Text("Pest Detection", style: GoogleFonts.poppins(fontWeight: FontWeight.w600)),
+        actions: [
+          _buildConnectivityIndicator(),
+          const SizedBox(width: 16),
+        ],
       ),
       body: RefreshIndicator(
         onRefresh: _handleRefresh,
-        child: Builder(
-          builder: (context) {
-            final screenWidth = MediaQuery.of(context).size.width;
-            final horizontalPadding = screenWidth > 600 ? screenWidth * 0.1 : 16.0;
-
-            return SingleChildScrollView(
-              physics: const AlwaysScrollableScrollPhysics(),
-              padding: EdgeInsets.symmetric(horizontal: horizontalPadding, vertical: 20),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: <Widget>[
-                  _buildModelManagementSection(),
-                  const SizedBox(height: 20),
-                  ElevatedButton.icon(
-                    icon: const Icon(Icons.photo_library_outlined),
-                    label: const Text("Pick Image from Gallery"),
-                    onPressed: _isLoading ? null : _pickImage,
-                    style: ElevatedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 24),
-                      textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-                  
-                  _buildContentArea(),
-                ],
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              _buildModelManagementSection(),
+              const SizedBox(height: 16),
+              _buildUploadModelSection(),
+              const SizedBox(height: 24),
+              
+              ElevatedButton.icon(
+                icon: const Icon(Icons.photo_library_outlined),
+                label: const Text("Pick Image from Gallery"),
+                onPressed: (_isLoading || _yoloModel == null) ? null : _pickImage,
               ),
-            );
-          }
+              const SizedBox(height: 24),
+              
+              // --- MODIFIED: Use AnimatedSwitcher for smooth transitions ---
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 500),
+                child: _buildContentArea(),
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
 
+  // +++ NEW: Persistent connectivity indicator for the AppBar +++
+  Widget _buildConnectivityIndicator() {
+    final color = _isConnected ? Colors.green.shade700 : Colors.orange.shade800;
+    final icon = _isConnected ? Icons.wifi_rounded : Icons.wifi_off_rounded;
+    return Tooltip(
+      message: _isConnected ? "Online" : "Offline",
+      child: Icon(icon, color: color),
+    );
+  }
+
+  // --- MODIFIED: Upload section with improved styling ---
+  Widget _buildUploadModelSection() {
+    if (!_isConnected) return const SizedBox.shrink();
+
+    return Card(
+      child: ExpansionTile(
+        key: const ValueKey('model-upload'),
+        leading: Icon(Icons.cloud_upload_outlined, color: Theme.of(context).colorScheme.secondary),
+        title: const Text("Upload New Model", style: TextStyle(fontWeight: FontWeight.bold)),
+        subtitle: const Text("Add a custom .tflite model"),
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TextField(
+                  controller: _modelNameController,
+                  decoration: const InputDecoration(
+                    labelText: "New Model Unique Name",
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.attach_file),
+                  label: Text(_selectedTfliteFileName ?? "Select .tflite File"),
+                  onPressed: _selectTfliteFile,
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size(double.infinity, 50),
+                    foregroundColor: _selectedTfliteFileName != null ? Colors.green : Theme.of(context).primaryColor,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    icon: const Icon(Icons.cloud_upload_outlined),
+                    label: const Text("Upload to Firebase"),
+                    onPressed: _isUploadingModel ? null : _uploadModel,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+   // --- MODIFIED: Use the enum and a switch statement to show the correct loader ---
   Widget _buildContentArea() {
     if (_isLoading) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 50.0),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Ensure you have a 'loading.gif' in an 'assets/images/' directory
-              Image.asset(
-                'assets/images/loading.gif',
-                width: 120,
-                height: 120,
+      Widget loaderWidget;
+      switch (_loaderType) {
+        case LoaderType.limitedFiveStar:
+          loaderWidget = Image.asset('assets/images/loading_limited.gif', width: 120, height: 120);
+          break;
+        case LoaderType.standardFiveStar:
+          loaderWidget = Image.asset('assets/images/loading.gif', width: 200, height: 200);
+          break;
+        case LoaderType.fourStar:
+          loaderWidget = Lottie.asset('assets/animations/loading_4.json', width: 200, height: 200);
+          break;
+        case LoaderType.regular:
+        default:
+          loaderWidget = Lottie.asset('assets/animations/loading.json', width: 200, height: 200);
+      }
+
+      return Container(
+        key: const ValueKey('loading'),
+        padding: const EdgeInsets.symmetric(vertical: 50.0),
+        child: Column(
+          children: [
+            loaderWidget,
+            if (_loadingMessage != null && _loadingMessage!.isNotEmpty) ...[
+              const SizedBox(height: 20),
+              Text(
+                _loadingMessage!,
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(color: Colors.grey.shade700),
               ),
-              if (_loadingMessage != null && _loadingMessage!.isNotEmpty) ...[
-                const SizedBox(height: 20),
-                Text(
-                  _loadingMessage!,
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(color: Colors.grey.shade700),
-                ),
-              ]
-            ],
-          ),
+            ]
+          ],
         ),
       );
     }
@@ -901,14 +1180,28 @@ class _DetectionScreenState extends State<DetectionScreen> {
       );
     }
     
-    // Default state when no image is picked yet
+     // --- MODIFIED: A much better initial empty state ---
     return Container(
-      padding: const EdgeInsets.symmetric(vertical: 60),
+      key: const ValueKey('initial'),
+      padding: const EdgeInsets.symmetric(vertical: 60, horizontal: 20),
       child: Center(
-        child: Text(
-          "Select a model and pick an image to begin.",
-          textAlign: TextAlign.center,
-          style: Theme.of(context).textTheme.titleLarge?.copyWith(color: Colors.grey.shade600),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.science_outlined, size: 80, color: Colors.grey.shade400),
+            const SizedBox(height: 20),
+            Text(
+              "Ready to Analyze",
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              "Select a model and pick an image",
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(color: Colors.grey.shade600),
+            ),
+          ],
         ),
       ),
     );
@@ -1025,8 +1318,8 @@ class _DetectionScreenState extends State<DetectionScreen> {
     // Fallback for models that might not produce a mask PNG
     if (_maskPngBytes == null) {
       return _recognitions.isNotEmpty
-        ? _buildImageWithBoxesOnly()
-        : Image.file(_imageFile!);
+      ? _buildImageWithBoxesOnly()
+      : Image.file(_imageFile!);
     }
 
     return LayoutBuilder(
@@ -1117,6 +1410,7 @@ class _DetectionScreenState extends State<DetectionScreen> {
     return completer.future;
   }
 
+   // --- MODIFIED: Results list item with better styling ---
   Widget _buildDetectionList() {
     return ListView.builder(
       shrinkWrap: true,
@@ -1127,12 +1421,11 @@ class _DetectionScreenState extends State<DetectionScreen> {
       final className = detection['className'] ?? 'Unknown';
       final confidence = (detection['confidence'] as num).toDouble();
       final isSelected = _selectedDetectionIndex == index;
-          
       final itemColor = _classColorMap[className] ?? Colors.grey.shade700;
 
       return Card(
           margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
-          elevation: isSelected ? 6 : 2,
+          elevation: isSelected ? 8 : 2,
           shadowColor: isSelected ? itemColor.withOpacity(0.5) : Colors.black.withOpacity(0.1),
           shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(12),
@@ -1140,62 +1433,50 @@ class _DetectionScreenState extends State<DetectionScreen> {
               ? BorderSide(color: itemColor, width: 2.5)
               : BorderSide(color: Colors.grey.shade300, width: 1),
           ),
-          child: InkWell( // Use InkWell for a nice ripple effect on tap
+          child: InkWell(
           borderRadius: BorderRadius.circular(12),
-          onTap: () {
-              setState(() {
-                _selectedDetectionIndex = isSelected ? null : index;
-              });
-          },
+          onTap: () { setState(() { _selectedDetectionIndex = isSelected ? null : index; }); },
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               child: Row(
                 children: [
                   Container(
-                    width: 40,
-                    height: 40,
+                    width: 44,
+                    height: 44,
                     alignment: Alignment.center,
                     decoration: BoxDecoration(
                       color: itemColor.withOpacity(0.15),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: itemColor, width: 1.5)
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: itemColor.withOpacity(0.8), width: 1.5)
                     ),
                     child: Text(
                       '${index + 1}',
                       style: TextStyle(
                         color: itemColor,
-                        fontSize: 16,
+                        fontSize: 18,
                         fontWeight: FontWeight.bold
                       ),
                     ),
                   ),
-                  const SizedBox(width: 12),
+                  const SizedBox(width: 16),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
                           className,
-                          style: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 17,
-                          ),
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
                         ),
                         const SizedBox(height: 4),
-                        Chip(
-                          label: Text(
-                            '${(confidence * 100).toStringAsFixed(1)}% Confidence',
-                            style: TextStyle(color: Colors.grey.shade800, fontWeight: FontWeight.w500),
-                          ),
-                          backgroundColor: Colors.grey.shade200,
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
-                          side: BorderSide(color: Colors.grey.shade300),
-                        )
+                        Text(
+                          '${(confidence * 100).toStringAsFixed(1)}% Confidence',
+                          style: TextStyle(color: Colors.grey.shade700, fontWeight: FontWeight.w500),
+                        ),
                       ],
                     ),
                   ),
                   if (isSelected)
-                    Icon(Icons.check_circle, color: itemColor),
+                    Icon(Icons.check_circle, color: itemColor, size: 28),
                 ],
               ),
             ),
