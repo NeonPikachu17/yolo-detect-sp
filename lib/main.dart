@@ -15,8 +15,9 @@ import 'package:ultralytics_yolo/ultralytics_yolo.dart';
 const String _prefsKeyLastModelName = "last_used_model_name";
 const String _prefsKeyLastTaskType = "last_used_task_type";
 
-// +++ UPDATED: Removed 'detect' task +++
-enum AppYoloTask { segment, classify }
+/// Enum to manage the selected YOLO task in the app's state.
+/// It now includes all three tasks: segment, detect, and classify.
+enum AppYoloTask { segment, detect, classify }
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -29,7 +30,6 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final textTheme = Theme.of(context).textTheme;
-    // +++ NEW: Updated color scheme for a more professional look +++
     return MaterialApp(
       title: 'Vision AI',
       theme: ThemeData(
@@ -75,19 +75,19 @@ class MyApp extends StatelessWidget {
           ),
         ),
       ),
-      home: const DetectionScreen(),
+      home: const VisionScreen(),
     );
   }
 }
 
-class DetectionScreen extends StatefulWidget {
-  const DetectionScreen({super.key});
+class VisionScreen extends StatefulWidget {
+  const VisionScreen({super.key});
 
   @override
-  State<DetectionScreen> createState() => _DetectionScreenState();
+  State<VisionScreen> createState() => _VisionScreenState();
 }
 
-class _DetectionScreenState extends State<DetectionScreen> {
+class _VisionScreenState extends State<VisionScreen> {
   YOLO? _yoloModel;
   File? _imageFile;
   List<Map<String, dynamic>> _recognitions = [];
@@ -103,9 +103,10 @@ class _DetectionScreenState extends State<DetectionScreen> {
   Map<String, Color> _classColorMap = {};
   Uint8List? _maskPngBytes;
 
-  AppYoloTask _selectedTask = AppYoloTask.classify;
+  AppYoloTask _selectedTask = AppYoloTask.segment;
   List<Map<String, String>> _availableModels = [];
 
+  // Vibrant colors for bounding boxes and masks
   final List<Color> _boxColors = [
     Colors.deepOrange, Colors.lightBlue, Colors.amber.shade600, Colors.pink,
     Colors.green, Colors.purple, Colors.red, Colors.teal,
@@ -117,17 +118,18 @@ class _DetectionScreenState extends State<DetectionScreen> {
     super.initState();
     _initializeScreenData();
   }
-
+  
+  /// Discovers local models and loads the last used model and task.
   Future<void> _initializeScreenData() async {
     _startLoading("Discovering local models...");
     _availableModels = await _discoverLocalModels();
     final prefs = await SharedPreferences.getInstance();
     final lastModelName = prefs.getString(_prefsKeyLastModelName);
-    var lastTaskIndex = prefs.getInt(_prefsKeyLastTaskType) ?? AppYoloTask.classify.index;
+    var lastTaskIndex = prefs.getInt(_prefsKeyLastTaskType) ?? AppYoloTask.segment.index;
 
-    // +++ UPDATED: Prevents range error if last saved task was 'detect' +++
+    // Prevents a range error if the saved task index is no longer valid.
     if (lastTaskIndex >= AppYoloTask.values.length) {
-      lastTaskIndex = AppYoloTask.classify.index;
+      lastTaskIndex = AppYoloTask.segment.index;
     }
 
     setState(() {
@@ -142,6 +144,7 @@ class _DetectionScreenState extends State<DetectionScreen> {
     }
   }
 
+  /// Finds all `.tflite` model files in the app's documents directory.
   Future<List<Map<String, String>>> _discoverLocalModels() async {
     final docDir = await getApplicationDocumentsDirectory();
     final files = docDir.listSync();
@@ -156,6 +159,7 @@ class _DetectionScreenState extends State<DetectionScreen> {
     }).toList();
   }
   
+  /// Imports a new model from the device's storage using a file picker.
   Future<void> _importModelFromPicker() async {
     final result = await FilePicker.platform.pickFiles(type: FileType.any);
     if (result == null || result.files.single.path == null) return;
@@ -189,6 +193,7 @@ class _DetectionScreenState extends State<DetectionScreen> {
     }
   }
 
+  /// Loads the selected YOLO model based on the current task type.
   Future<void> _prepareAndLoadModel(Map<String, String> modelData) async {
     _clearScreen();
     _startLoading("Loading ${modelData['name']}...");
@@ -201,11 +206,13 @@ class _DetectionScreenState extends State<DetectionScreen> {
 
       if (_yoloModel != null) await _yoloModel!.dispose();
       
-      // +++ UPDATED: Simplified logic by removing 'detect' case +++
       late YOLOTask yoloTask;
       switch (_selectedTask) {
         case AppYoloTask.segment:
           yoloTask = YOLOTask.segment;
+          break;
+        case AppYoloTask.detect:
+          yoloTask = YOLOTask.detect;
           break;
         case AppYoloTask.classify:
           yoloTask = YOLOTask.classify;
@@ -231,6 +238,7 @@ class _DetectionScreenState extends State<DetectionScreen> {
     }
   }
 
+  /// Deletes the `.tflite` model and associated label file from local storage.
   Future<void> _deleteLocallyStoredModel(String modelName) async {
     final modelData = _availableModels.firstWhere((m) => m['name'] == modelName);
     final modelFile = File(modelData['modelPath']!);
@@ -256,6 +264,7 @@ class _DetectionScreenState extends State<DetectionScreen> {
     _showSnackBar("Deleted '$modelName'.", isError: false);
   }
 
+  /// Sets the selected image file and original dimensions.
   Future<void> _processImage(XFile image) async {
     final imageBytes = await image.readAsBytes();
     final decodedImage = await decodeImageFromList(imageBytes);
@@ -266,6 +275,7 @@ class _DetectionScreenState extends State<DetectionScreen> {
       _maskPngBytes = null;
       _originalImageWidth = decodedImage.width.toDouble();
       _originalImageHeight = decodedImage.height.toDouble();
+      _selectedDetectionIndex = null;
     });
 
     if (_yoloModel != null) {
@@ -275,25 +285,26 @@ class _DetectionScreenState extends State<DetectionScreen> {
     }
   }
   
+  /// Opens the image gallery to pick an image.
   Future<void> _pickImage() async {
     final picker = ImagePicker();
     final image = await picker.pickImage(source: ImageSource.gallery);
     if (image != null) await _processImage(image);
   }
 
+  /// Opens the camera to take a picture.
   Future<void> _takePicture() async {
     final picker = ImagePicker();
     final image = await picker.pickImage(source: ImageSource.camera);
     if (image != null) await _processImage(image);
   }
 
+  /// Runs the YOLO model inference and processes the results based on the task.
   Future<void> _runInference() async {
     if (_imageFile == null || _yoloModel == null) return;
     _startLoading("Analyzing image...");
 
     try {
-      print("Starting analysis with task: $_selectedTask");
-
       final imageBytes = await _imageFile!.readAsBytes();
       final detections = await _yoloModel!.predict(imageBytes);
       if (!mounted) return;
@@ -303,41 +314,45 @@ class _DetectionScreenState extends State<DetectionScreen> {
       Uint8List? newMaskPngBytes;
       int colorIndex = 0;
 
-      if (_selectedTask == AppYoloTask.classify) {
-        final Map<String, dynamic> classificationResult = Map.from((detections as Map?) ?? {});
-        
-        // +++ FIX: Change the variable type to a generic Map? to match the data +++
-        final Map? nestedClassificationMap = classificationResult['classification'] as Map?;
+      switch (_selectedTask) {
+        case AppYoloTask.classify:
+          final Map<String, dynamic> classificationResult = Map.from((detections as Map?) ?? {});
+          final Map? nestedClassificationMap = classificationResult['classification'] as Map?;
 
-        if (nestedClassificationMap != null) {
-          final List<dynamic>? top5Classes = nestedClassificationMap['top5Classes'];
-          final List<dynamic>? top5Confidences = nestedClassificationMap['top5Confidences'];
+          if (nestedClassificationMap != null) {
+            final List<dynamic>? top5Classes = nestedClassificationMap['top5Classes'];
+            final List<dynamic>? top5Confidences = nestedClassificationMap['top5Confidences'];
 
-          if (top5Classes != null && top5Confidences != null && top5Classes.length == top5Confidences.length) {
-            for (int i = 0; i < top5Classes.length; i++) {
-              formattedRecognitions.add({
-                'className': top5Classes[i],
-                'confidence': top5Confidences[i],
-              });
+            if (top5Classes != null && top5Confidences != null && top5Classes.length == top5Confidences.length) {
+              for (int i = 0; i < top5Classes.length; i++) {
+                formattedRecognitions.add({
+                  'className': top5Classes[i],
+                  'confidence': top5Confidences[i],
+                });
+              }
             }
           }
-        }
-      } else { // Handle segmentation
-        final Map<String, dynamic> detectionMap = Map.from((detections as Map?) ?? {});
-        final List<dynamic> boxes = (detectionMap['boxes'] as List<dynamic>?) ?? [];
+          break;
         
-        for (var box in boxes) {
-          final className = box['className'];
-          formattedRecognitions.add({
-            'x1': box['x1'], 'y1': box['y1'], 'x2': box['x2'], 'y2': box['y2'],
-            'className': className, 'confidence': box['confidence'],
-          });
-          if (!tempColorMap.containsKey(className)) {
-            tempColorMap[className] = _boxColors[colorIndex % _boxColors.length];
-            colorIndex++;
+        case AppYoloTask.segment:
+        case AppYoloTask.detect:
+          final Map<String, dynamic> detectionMap = Map.from((detections as Map?) ?? {});
+          final List<dynamic> boxes = (detectionMap['boxes'] as List<dynamic>?) ?? [];
+          
+          for (var box in boxes) {
+            final className = box['className'];
+            formattedRecognitions.add({
+              'x1': box['x1'], 'y1': box['y1'], 'x2': box['x2'], 'y2': box['y2'],
+              'className': className, 'confidence': box['confidence'],
+            });
+            if (!tempColorMap.containsKey(className)) {
+              tempColorMap[className] = _boxColors[colorIndex % _boxColors.length];
+              colorIndex++;
+            }
           }
-        }
-        newMaskPngBytes = detectionMap['maskPng'];
+          // Only segmentation tasks will return a mask.
+          newMaskPngBytes = (_selectedTask == AppYoloTask.segment) ? detectionMap['maskPng'] : null;
+          break;
       }
 
       setState(() {
@@ -352,14 +367,16 @@ class _DetectionScreenState extends State<DetectionScreen> {
     }
   }
   
+  // --- Helper Methods for State and UI ---
+
   Future<void> _handleRefresh() async {
     _clearScreen();
     await _initializeScreenData();
   }
 
   void _startLoading(String message) => setState(() { _isLoading = true; _loadingMessage = message; });
-  void _clearScreen() => setState(() { _imageFile = null; _recognitions = []; _maskPngBytes = null; });
   void _stopLoading() => setState(() { _isLoading = false; _loadingMessage = null; });
+  void _clearScreen() => setState(() { _imageFile = null; _recognitions = []; _maskPngBytes = null; _selectedDetectionIndex = null; });
 
   void _showSnackBar(String message, {required bool isError}) {
     if (!mounted) return;
@@ -401,6 +418,9 @@ class _DetectionScreenState extends State<DetectionScreen> {
     );
   }
 
+  // --- UI Widget Builders ---
+
+  /// Builds the card for managing models and selecting the analysis task.
   Widget _buildModelManagementCard() {
     return Card(
       child: Padding(
@@ -435,19 +455,20 @@ class _DetectionScreenState extends State<DetectionScreen> {
             const SizedBox(height: 16),
             Text("ANALYSIS TASK", style: Theme.of(context).textTheme.labelLarge?.copyWith(color: Theme.of(context).colorScheme.secondary)),
             const SizedBox(height: 8),
-            // +++ UPDATED: Removed the 'Detect' button +++
             SegmentedButton<AppYoloTask>(
               segments: const [
                 ButtonSegment<AppYoloTask>(value: AppYoloTask.segment, label: Text('Segment'), icon: Icon(Icons.grain_rounded)),
+                ButtonSegment<AppYoloTask>(value: AppYoloTask.detect, label: Text('Detect'), icon: Icon(Icons.select_all_rounded)),
                 ButtonSegment<AppYoloTask>(value: AppYoloTask.classify, label: Text('Classify'), icon: Icon(Icons.label_important_outline)),
               ],
               selected: {_selectedTask},
               onSelectionChanged: (newSelection) {
                 if (_isLoading) return;
                 setState(() => _selectedTask = newSelection.first);
+                // Reload the model with the new task type if a model is selected
                 if (_selectedModelName != null) {
-                    final modelData = _availableModels.firstWhere((m) => m['name'] == _selectedModelName);
-                    _prepareAndLoadModel(modelData);
+                  final modelData = _availableModels.firstWhere((m) => m['name'] == _selectedModelName);
+                  _prepareAndLoadModel(modelData);
                 }
               },
             ),
@@ -457,6 +478,7 @@ class _DetectionScreenState extends State<DetectionScreen> {
     );
   }
 
+  /// Displays a modal sheet to select, import, or delete models.
   void _showModelSelectionSheet() {
     showModalBottomSheet(
       context: context,
@@ -494,7 +516,7 @@ class _DetectionScreenState extends State<DetectionScreen> {
                           icon: Icon(Icons.delete_outline, color: Theme.of(context).colorScheme.error),
                           onPressed: () {
                               Navigator.of(ctx).pop();
-                              _showDeleteConfirmationDialog(model['name']!);
+                            _showDeleteConfirmationDialog(model['name']!);
                           },
                         ),
                       );
@@ -517,6 +539,7 @@ class _DetectionScreenState extends State<DetectionScreen> {
     );
   }
 
+  /// Builds the bottom action bar with Gallery and Camera buttons.
   Widget _buildBottomActionBar() {
     final bool isReadyForAnalysis = _yoloModel != null && !_isLoading;
     return SafeArea(
@@ -549,6 +572,7 @@ class _DetectionScreenState extends State<DetectionScreen> {
     );
   }
 
+  /// Determines which content to display: loading, initial placeholder, or results.
   Widget _buildContentArea() {
     if (_isLoading) {
       return Container(
@@ -566,10 +590,12 @@ class _DetectionScreenState extends State<DetectionScreen> {
       );
     }
     if (_imageFile != null) {
+      // Show different views based on the selected task.
       if (_selectedTask == AppYoloTask.classify) {
         return _buildClassificationView();
+      } else { // Handles both detect and segment tasks
+        return _buildDetectionView();
       }
-      return _buildDetectionView();
     }
     return Container(
       key: const ValueKey('initial'),
@@ -592,8 +618,10 @@ class _DetectionScreenState extends State<DetectionScreen> {
     );
   }
 
+  /// Builds the view for `detect` and `segment` tasks.
   Widget _buildDetectionView() {
     return LayoutBuilder(builder: (context, constraints) {
+      // Use a two-column layout on wider screens.
       if (constraints.maxWidth > 700) {
         return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Expanded(flex: 6, child: _buildResultsImage()),
@@ -608,7 +636,7 @@ class _DetectionScreenState extends State<DetectionScreen> {
     });
   }
 
-  // +++ UPDATED: This widget now builds a column with the image and a list of results +++
+  /// Builds the view for the `classify` task.
   Widget _buildClassificationView() {
     return Column(
       children: [
@@ -638,8 +666,33 @@ class _DetectionScreenState extends State<DetectionScreen> {
       ],
     );
   }
+  
+  /// Displays the processed image with drawn bounding boxes and masks.
+  Widget _buildResultsImage() => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text("Analysis Result", style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold)),
+          IconButton(onPressed: _clearScreen, icon: const Icon(Icons.close_rounded), tooltip: "Clear Image"),
+        ],
+      ),
+      const SizedBox(height: 12),
+      Card(elevation: 4, shadowColor: Colors.black.withOpacity(0.2), clipBehavior: Clip.antiAlias, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)), child: _recognitions.isEmpty && !_isLoading ? _buildNoDetectionsFound() : _buildImageWithDetections())
+    ]);
 
-  // +++ NEW: A widget to display just the image for classification +++
+  /// Displays the list of detected objects.
+  Widget _buildResultsList() => Column(children: [
+      // Interactive controls are only shown for segmentation tasks.
+      if (_recognitions.isNotEmpty && _selectedTask == AppYoloTask.segment) ...[
+        _buildInteractiveControls(), 
+        const SizedBox(height: 20)
+      ],
+      Text("Detected Objects: ${_recognitions.length}", style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
+      const SizedBox(height: 10),
+      _buildDetectionList(),
+    ]);
+  
+  /// Displays the image without overlays for classification.
   Widget _buildClassificationImage() {
     if (_imageFile == null) return const SizedBox.shrink();
     return Card(
@@ -651,7 +704,7 @@ class _DetectionScreenState extends State<DetectionScreen> {
     );
   }
   
-  // +++ NEW: A widget to display the top 5 results in a list +++
+  /// Displays the top 5 classification results in a styled list.
   Widget _buildClassificationList() {
     return ListView.builder(
       shrinkWrap: true,
@@ -687,10 +740,7 @@ class _DetectionScreenState extends State<DetectionScreen> {
                     children: [
                       Text(
                         className,
-                        style: const TextStyle(
-                          fontSize: 17,
-                          fontWeight: FontWeight.w600,
-                        ),
+                        style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
                       ),
                       const SizedBox(height: 5),
                       LinearProgressIndicator(
@@ -701,10 +751,7 @@ class _DetectionScreenState extends State<DetectionScreen> {
                       const SizedBox(height: 5),
                       Text(
                         '${(confidence * 100).toStringAsFixed(1)}% Confidence',
-                        style: TextStyle(
-                          fontSize: 13,
-                          color: Colors.grey.shade700,
-                        ),
+                        style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
                       ),
                     ],
                   ),
@@ -716,67 +763,18 @@ class _DetectionScreenState extends State<DetectionScreen> {
       },
     );
   }
-  
-  // Widget _buildClassificationResult() {
-  //   if (_imageFile == null) return const SizedBox.shrink();
-  //   final topResult = _recognitions.first;
-  //   final className = topResult['className'];
 
-  //   // +++ FIX: Provide a default value for confidence in case it's null +++
-  //   final num confidenceValue = topResult['confidence'] ?? 0.0;
-  //   final confidence = (confidenceValue * 100).toStringAsFixed(1);
-    
-  //   print(topResult);
-    
-  //   return Stack(
-  //     alignment: Alignment.bottomCenter,
-  //     children: [
-  //       Image.file(_imageFile!),
-  //       Container(
-  //         width: double.infinity,
-  //         color: Colors.black.withOpacity(0.7),
-  //         padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
-  //         child: Text(
-  //           '$className ($confidence%)',
-  //           style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold),
-  //           textAlign: TextAlign.center,
-  //         ),
-  //       ),
-  //     ],
-  //   );
-  // }
-  
-  Widget _buildResultsImage() => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Text("Analysis Result", style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold)),
-          IconButton(onPressed: _clearScreen, icon: const Icon(Icons.close_rounded), tooltip: "Clear Image"),
-        ],
-      ),
-      const SizedBox(height: 12),
-      Card(elevation: 4, shadowColor: Colors.black.withOpacity(0.2), clipBehavior: Clip.antiAlias, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)), child: _recognitions.isEmpty && !_isLoading ? _buildNoDetectionsFound() : _buildImageWithDetections())
-    ]);
-
-  Widget _buildResultsList() => Column(children: [
-      if (_recognitions.isNotEmpty && _selectedTask == AppYoloTask.segment) ...[
-        _buildInteractiveControls(), 
-        const SizedBox(height: 20)
-      ],
-      Text("Detected Objects: ${_recognitions.length}", style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
-      const SizedBox(height: 10),
-      _buildDetectionList(),
-    ]);
-
+  /// Builds controls for mask visibility and opacity.
   Widget _buildInteractiveControls() => Card(elevation: 2, shadowColor: Colors.black.withOpacity(0.1), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)), child: Padding(padding: const EdgeInsets.all(12.0), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [const Text("Show Masks", style: TextStyle(fontWeight: FontWeight.bold)), Switch(value: _showMasks, onChanged: (value) => setState(() => _showMasks = value))]),
       const SizedBox(height: 8),
       const Text("Mask Opacity", style: TextStyle(fontWeight: FontWeight.bold)),
-      Slider(value: _maskOpacity, min: 0.1, max: 1.0, onChanged: (value) => setState(() => _maskOpacity = value))
+      Slider(value: _maskOpacity, min: 0.1, max: 1.0, divisions: 9, label: _maskOpacity.toStringAsFixed(1), onChanged: (value) => setState(() => _maskOpacity = value))
     ])));
 
+  /// Shows an overlay on the image when no objects are detected.
   Widget _buildNoDetectionsFound() => Stack(alignment: Alignment.center, children: [
-      Image.file(_imageFile!),
+      if (_imageFile != null) Image.file(_imageFile!),
       Container(
         color: Colors.black.withOpacity(0.6),
         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
@@ -784,12 +782,16 @@ class _DetectionScreenState extends State<DetectionScreen> {
       )
     ]);
 
+  /// Chooses the correct painter based on whether masks are available.
   Widget _buildImageWithDetections() {
     if (_imageFile == null) return const SizedBox.shrink();
-    // +++ UPDATED: Simplified condition by removing 'detect' check +++
+    
+    // If no mask data, use the simpler painter with only boxes.
     if (_maskPngBytes == null) {
       return _buildImageWithBoxesOnly();
     }
+
+    // Otherwise, build the full painter with masks.
     return LayoutBuilder(builder: (context, constraints) {
       if (_originalImageWidth == 0) return const SizedBox.shrink();
       final scaleRatio = constraints.maxWidth / _originalImageWidth;
@@ -803,6 +805,7 @@ class _DetectionScreenState extends State<DetectionScreen> {
     });
   }
 
+  /// Builds the painter for images with only bounding boxes (no masks).
   Widget _buildImageWithBoxesOnly() => LayoutBuilder(builder: (context, constraints) {
     if (_originalImageWidth == 0) return const SizedBox.shrink();
     final scaleRatio = constraints.maxWidth / _originalImageWidth;
@@ -815,13 +818,11 @@ class _DetectionScreenState extends State<DetectionScreen> {
     );
   });
 
+  /// Builds the list of detected items, allowing for selection to highlight.
   Widget _buildDetectionList() => ListView.builder(shrinkWrap: true, physics: const NeverScrollableScrollPhysics(), itemCount: _recognitions.length, itemBuilder: (context, index) {
     final detection = _recognitions[index];
     final className = detection['className'] ?? 'Unknown';
-
-    // +++ FIX: Provide a default value for confidence in case it's null +++
-    final confidence = (detection['confidence'] ?? 0.0) as num;
-    
+    final confidence = (detection['confidence'] as num).toDouble();
     final isSelected = _selectedDetectionIndex == index;
     final itemColor = _classColorMap[className] ?? Colors.grey.shade700;
     return Card(
@@ -849,6 +850,8 @@ class _DetectionScreenState extends State<DetectionScreen> {
       ),
     );
   });
+  
+  // --- Utility Functions ---
 
   Future<ui.Image> _loadImage(File imageFile) async {
     final bytes = await imageFile.readAsBytes();
@@ -876,7 +879,7 @@ class _DetectionScreenState extends State<DetectionScreen> {
   }
 }
 
-// +++ FIX: Painter class refactored to remove internal color logic +++
+/// Custom painter to draw the original image, segmentation masks, and bounding boxes.
 class _DetectionPainter extends CustomPainter {
   final ui.Image originalImage;
   final ui.Image? maskImage;
@@ -900,26 +903,20 @@ class _DetectionPainter extends CustomPainter {
   
   @override
   void paint(Canvas canvas, Size size) {
+    // Draw the original image as the background.
     paintImage(canvas: canvas, rect: Rect.fromLTWH(0, 0, size.width, size.height), image: originalImage, fit: BoxFit.fill);
+    
+    // Draw segmentation masks if available and enabled.
     if (showMasks && maskImage != null && recognitions.isNotEmpty) {
       canvas.save();
       final stencilPath = Path();
+      // If an item is selected, only show its mask. Otherwise, show all.
       if (selectedDetectionIndex != null) {
           final detection = recognitions[selectedDetectionIndex!];
-          // +++ FIX: Provide default values for coordinates +++
-          stencilPath.addRect(Rect.fromLTRB(
-              (detection['x1'] ?? 0) * scaleRatio, 
-              (detection['y1'] ?? 0) * scaleRatio, 
-              (detection['x2'] ?? 0) * scaleRatio, 
-              (detection['y2'] ?? 0) * scaleRatio));
+          stencilPath.addRect(Rect.fromLTRB((detection['x1'] ?? 0) * scaleRatio, (detection['y1'] ?? 0) * scaleRatio, (detection['x2'] ?? 0) * scaleRatio, (detection['y2'] ?? 0) * scaleRatio));
       } else {
         for (final detection in recognitions) {
-          // +++ FIX: Provide default values for coordinates +++
-          stencilPath.addRect(Rect.fromLTRB(
-              (detection['x1'] ?? 0) * scaleRatio, 
-              (detection['y1'] ?? 0) * scaleRatio, 
-              (detection['x2'] ?? 0) * scaleRatio, 
-              (detection['y2'] ?? 0) * scaleRatio));
+          stencilPath.addRect(Rect.fromLTRB((detection['x1'] ?? 0) * scaleRatio, (detection['y1'] ?? 0) * scaleRatio, (detection['x2'] ?? 0) * scaleRatio, (detection['y2'] ?? 0) * scaleRatio));
         }
       }
       canvas.clipPath(stencilPath);
@@ -927,13 +924,14 @@ class _DetectionPainter extends CustomPainter {
       canvas.drawImageRect(maskImage!, Rect.fromLTWH(0, 0, maskImage!.width.toDouble(), maskImage!.height.toDouble()), Rect.fromLTWH(0, 0, size.width, size.height), maskPaint);
       canvas.restore();
     }
+    
+    // Draw bounding boxes and labels for all detections.
     for (int i = 0; i < recognitions.length; i++) {
       final detection = recognitions[i];
       final className = detection['className'] ?? 'Unknown';
-      final color = classColorMap[className]!;
+      final color = classColorMap[className] ?? Colors.grey;
       final isSelected = i == selectedDetectionIndex;
       
-      // +++ FIX: Provide default values for coordinates +++
       final x1 = (detection['x1'] ?? 0) * scaleRatio;
       final y1 = (detection['y1'] ?? 0) * scaleRatio;
       final x2 = (detection['x2'] ?? 0) * scaleRatio;
@@ -942,26 +940,12 @@ class _DetectionPainter extends CustomPainter {
       final boxPaint = Paint()..color = color..style = PaintingStyle.stroke..strokeWidth = isSelected ? 4.0 : 2.5;
       canvas.drawRect(Rect.fromLTRB(x1, y1, x2, y2), boxPaint);
 
-      // +++ FIX: Provide a default value for confidence +++
-      final confidence = (detection['confidence'] ?? 0.0) as num;
-
-      final textPainter = TextPainter(
-        text: TextSpan(
-          text: '$className (${(confidence * 100).toStringAsFixed(1)}%)',
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 14,
-            fontWeight: FontWeight.bold,
-            shadows: [Shadow(color: Colors.black, blurRadius: 4)],
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-      );
-
+      final confidence = (detection['confidence'] as num? ?? 0.0);
+      final textPainter = TextPainter(text: TextSpan(text: '$className (${(confidence * 100).toStringAsFixed(1)}%)', style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold, shadows: [Shadow(color: Colors.black, blurRadius: 4)])), textDirection: TextDirection.ltr);
       textPainter.layout(minWidth: 0, maxWidth: size.width);
       final labelBackgroundPaint = Paint()..color = color.withOpacity(isSelected ? 1.0 : 0.8);
       double top = y1 - textPainter.height - 4;
-      if (top < 0) top = y2 + 2;
+      if (top < 0) top = y2 + 2; // Move label to bottom if it doesn't fit on top
       final finalLabelRect = Rect.fromLTWH(x1, top, textPainter.width + 8, textPainter.height + 4);
       canvas.drawRect(finalLabelRect, labelBackgroundPaint);
       textPainter.paint(canvas, Offset(x1 + 4, top + 2));
