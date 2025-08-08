@@ -309,6 +309,9 @@ class _VisionScreenState extends State<VisionScreen> {
       final detections = await _yoloModel!.predict(imageBytes);
       if (!mounted) return;
 
+      final double modelImageWidth = (detections['image_width'] as num?)?.toDouble() ?? _originalImageWidth;
+      final double modelImageHeight = (detections['image_height'] as num?)?.toDouble() ?? _originalImageHeight;
+
       final formattedRecognitions = <Map<String, dynamic>>[];
       final tempColorMap = <String, Color>{};
       Uint8List? newMaskPngBytes;
@@ -359,6 +362,9 @@ class _VisionScreenState extends State<VisionScreen> {
         _recognitions = formattedRecognitions;
         _classColorMap = tempColorMap;
         _maskPngBytes = newMaskPngBytes;
+
+        _originalImageWidth = modelImageWidth;
+        _originalImageHeight = modelImageHeight;
       });
     } catch (e) {
       _showSnackBar("Error during analysis: $e", isError: true);
