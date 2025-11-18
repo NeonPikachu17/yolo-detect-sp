@@ -398,28 +398,48 @@ class _VisionScreenState extends State<VisionScreen> {
   
   /// Uploads a local model and its label file to Firebase Storage.
   Future<void> _uploadModel(String modelName) async {
-    // modelName is the local name (e.g., "MyCustomModel")
     final modelData = _availableModels.firstWhere((m) => m['name'] == modelName);
     final modelFile = File(modelData['modelPath']!);
     final labelsFile = File(modelData['labelsPath']!);
 
     _startLoading("Uploading '$modelName'...");
     try {
-      // FIXED: Upload to 'yoloModels/$modelName/model.tflite'
-      final modelRef = FirebaseStorage.instance.ref('yoloModels/$modelName/model.tflite');
-      await modelRef.putFile(modelFile);
+      // Create metadata to help track the file (optional but good practice)
+      final metadata = SettableMetadata(
+        contentType: 'application/octet-stream',
+        customMetadata: {'uploaded_by': 'user_device'},
+      );
 
-      // Upload labels file if it exists
+      // 1. Upload Model
+      final modelRef = FirebaseStorage.instance.ref('yoloModels/$modelName/model.tflite');
+      await modelRef.putFile(modelFile, metadata);
+
+      // 2. Upload Labels (if exists)
       if (await labelsFile.exists()) {
-        // FIXED: Upload label to 'yoloModels/$modelName/labels.txt'
         final labelsRef = FirebaseStorage.instance.ref('yoloModels/$modelName/labels.txt');
-        await labelsRef.putFile(labelsFile);
+        await labelsRef.putFile(labelsFile, SettableMetadata(contentType: 'text/plain'));
       }
+
+      _showSnackBar("'$modelName' uploaded successfully!", isError: false);
+      await _fetchCloudModels(); 
       
-      _showSnackBar("'$modelName' uploaded successfully.", isError: false);
-      await _fetchCloudModels(); // Refresh cloud list after upload
+    } on FirebaseException catch (e) {
+      // catch specific Firebase errors
+      String errorMessage = "Upload failed.";
+      
+      if (e.code == 'unauthorized') {
+        errorMessage = "Permission Denied: Check Firebase Console Storage Rules.";
+      } else if (e.code == 'retry-limit-exceeded') {
+        errorMessage = "Upload took too long. Check your connection.";
+      } else if (e.code == 'unknown') {
+        errorMessage = "Unknown Error: Check AndroidManifest for Internet permission.";
+      }
+
+      debugPrint("Firebase Error: ${e.code} | ${e.message}");
+      _showSnackBar(errorMessage, isError: true);
+      
     } catch (e) {
-      _showSnackBar("Error uploading model: $e", isError: true);
+      _showSnackBar("System Error: $e", isError: true);
     } finally {
       _stopLoading();
     }
