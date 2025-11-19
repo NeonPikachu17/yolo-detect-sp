@@ -178,14 +178,14 @@ class _VisionScreenState extends State<VisionScreen> with SingleTickerProviderSt
       if (!await File(modelPath).exists()) {
         try {
           // Copy model from assets
-          final modelData = await rootBundle.load('assets/$modelName.tflite');
+          final modelData = await rootBundle.load('assets/models/$modelName.tflite');
           await File(modelPath).writeAsBytes(modelData.buffer.asUint8List(
             modelData.offsetInBytes, modelData.lengthInBytes
           ));
           
           // Copy labels file
           try {
-            final labelsData = await rootBundle.load('assets/$modelName.txt');
+            final labelsData = await rootBundle.load('assets/models/$modelName.txt');
              await File(labelsPath).writeAsBytes(labelsData.buffer.asUint8List(
               labelsData.offsetInBytes, labelsData.lengthInBytes
             ));
@@ -193,7 +193,7 @@ class _VisionScreenState extends State<VisionScreen> with SingleTickerProviderSt
             await File(labelsPath).create(); // Create empty if missing
           }
         } catch (e) {
-          throw Exception("Asset not found: assets/$modelName.tflite");
+          throw Exception("Asset not found: assets/models/$modelName.tflite");
         }
       }
 
