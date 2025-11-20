@@ -70,7 +70,6 @@ flutter:
   # the material Icons class.
   uses-material-design: true
   assets:
-    - assets/images/
     - assets/animations/
 
 flutter_launcher_icons:
