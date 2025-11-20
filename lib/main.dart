@@ -239,27 +239,6 @@ class _VisionScreenState extends State<VisionScreen> with SingleTickerProviderSt
 
   // --- File & Image Handling ---
 
-  Future<ui.Image> _resizeAndCropToPortrait(ui.Image originalImage, double targetWidth, double targetHeight) async {
-    final double scale = max(targetWidth / originalImage.width, targetHeight / originalImage.height);
-    final double newWidth = originalImage.width * scale;
-    final double newHeight = originalImage.height * scale;
-    final double cropX = (newWidth - targetWidth) / 2;
-    final double cropY = (newHeight - targetHeight) / 2;
-
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, targetWidth, targetHeight));
-
-    canvas.drawImageRect(
-      originalImage,
-      Rect.fromLTWH(cropX / scale, cropY / scale, targetWidth / scale, targetHeight / scale),
-      Rect.fromLTWH(0, 0, targetWidth, targetHeight),
-      Paint(),
-    );
-
-    final picture = recorder.endRecording();
-    return await picture.toImage(targetWidth.toInt(), targetHeight.toInt());
-  }
-
   Future<void> _processImage(XFile image) async {
     final imageBytes = await image.readAsBytes();
     final decodedImage = await decodeImageFromList(imageBytes);
@@ -329,9 +308,13 @@ class _VisionScreenState extends State<VisionScreen> with SingleTickerProviderSt
     }
   }
 
+  // --- DATA COLLECTION POINT: Offline Load Latency ---
   Future<void> _prepareAndLoadModel(Map<String, String> modelData) async {
     _clearScreen();
     _startLoading("Loading ${modelData['name']}...");
+
+    // 1. Start Timer
+    final stopwatch = Stopwatch()..start();
 
     try {
       final targetModelPath = modelData['modelPath']!;
@@ -357,13 +340,19 @@ class _VisionScreenState extends State<VisionScreen> with SingleTickerProviderSt
       _yoloModel = YOLO(modelPath: targetModelPath, task: yoloTask);
       await _yoloModel?.loadModel();
 
+      // 2. Stop Timer and Log
+      stopwatch.stop();
+      print("--------------------------------------------------");
+      print("[DATA_COLLECTION] Offline Load Latency: ${stopwatch.elapsedMilliseconds} ms");
+      print("--------------------------------------------------");
+
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_prefsKeyLastModelName, modelData['name']!);
       await prefs.setInt(_prefsKeyLastTaskType, _selectedTask.index);
 
       if (mounted) {
         setState(() { _selectedModelName = modelData['name']; });
-        _showSnackBar("'${modelData['name']}' loaded successfully.", isError: false);
+        _showSnackBar("'${modelData['name']}' loaded in ${stopwatch.elapsedMilliseconds}ms", isError: false);
       }
     } catch (e) {
       _showSnackBar("Failed to load model: ${e.toString()}", isError: true);
@@ -413,8 +402,13 @@ class _VisionScreenState extends State<VisionScreen> with SingleTickerProviderSt
     }
   }
 
+  // --- DATA COLLECTION POINT: Online Download Latency ---
   Future<void> _downloadModel(String modelName) async {
     _startLoading("Downloading '$modelName'...");
+    
+    // 1. Start Timer
+    final stopwatch = Stopwatch()..start();
+
     try {
       final docDir = await getApplicationDocumentsDirectory();
       final localModelPath = p.join(docDir.path, '$modelName.tflite');
@@ -436,6 +430,12 @@ class _VisionScreenState extends State<VisionScreen> with SingleTickerProviderSt
         await File(localLabelsPath).create();
       }
       
+      // 2. Stop Timer and Log
+      stopwatch.stop();
+      print("--------------------------------------------------");
+      print("[DATA_COLLECTION] Online Download Latency: ${stopwatch.elapsedMilliseconds} ms");
+      print("--------------------------------------------------");
+
       _showSnackBar("'$modelName' downloaded successfully.", isError: false);
       await _handleRefresh(); 
     } catch (e) {
@@ -496,13 +496,24 @@ class _VisionScreenState extends State<VisionScreen> with SingleTickerProviderSt
     if (image != null) await _processImage(image);
   }
 
+  // --- DATA COLLECTION POINT: Inference Time ---
   Future<void> _runInference() async {
     if (_imageFile == null || _yoloModel == null) return;
     _startLoading("Analyzing...");
 
+    // 1. Start Timer
+    final stopwatch = Stopwatch()..start();
+
     try {
       final imageBytes = await _imageFile!.readAsBytes();
       final detections = await _yoloModel!.predict(imageBytes);
+      
+      // 2. Stop Timer and Log
+      stopwatch.stop();
+      print("--------------------------------------------------");
+      print("[DATA_COLLECTION] Inference Time: ${stopwatch.elapsedMilliseconds} ms");
+      print("--------------------------------------------------");
+
       if (!mounted) return;
 
       final double modelWidth = (detections['image_width'] as num?)?.toDouble() ?? _originalImageWidth;
@@ -572,6 +583,9 @@ class _VisionScreenState extends State<VisionScreen> with SingleTickerProviderSt
         _modelImageWidth = modelWidth;
         _modelImageHeight = modelHeight;
       });
+
+      _showSnackBar("Analysis complete in ${stopwatch.elapsedMilliseconds}ms", isError: false);
+
     } catch (e) {
       _showSnackBar("Error during analysis: $e", isError: true);
     } finally {
@@ -618,11 +632,9 @@ class _VisionScreenState extends State<VisionScreen> with SingleTickerProviderSt
               child: RefreshIndicator(
                 color: Theme.of(context).primaryColor,
                 onRefresh: _handleRefresh,
-                // Use CustomScrollView for responsive "sticky" layout
                 child: CustomScrollView(
                   physics: const AlwaysScrollableScrollPhysics(),
                   slivers: [
-                    // 1. Top Card
                     SliverPadding(
                       padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
                       sliver: SliverToBoxAdapter(
@@ -634,11 +646,10 @@ class _VisionScreenState extends State<VisionScreen> with SingleTickerProviderSt
                         ),
                       ),
                     ),
-                    // 2. Content Area (Fills remaining space)
                     SliverFillRemaining(
                       hasScrollBody: false,
                       child: Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 120), // Bottom padding for navbar
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 120), 
                         child: AnimatedSwitcher(
                           duration: const Duration(milliseconds: 500),
                           transitionBuilder: (Widget child, Animation<double> animation) {
@@ -1049,7 +1060,6 @@ class _VisionScreenState extends State<VisionScreen> with SingleTickerProviderSt
   Widget _buildLoadingModalOverlay() {
     return Stack(
       children: [
-        // Backdrop blur
         BackdropFilter(
           filter: ui.ImageFilter.blur(sigmaX: 4.0, sigmaY: 4.0),
           child: const Opacity(
@@ -1451,7 +1461,6 @@ class _VisionScreenState extends State<VisionScreen> with SingleTickerProviderSt
   }
 }
 
-// FIXED: This is the correct painter class that respects aspect ratio
 class _DetectionPainter extends CustomPainter {
   final ui.Image originalImage;
   final ui.Image? maskImage;
@@ -1477,13 +1486,11 @@ class _DetectionPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    // 1. Calculate the 'fit: BoxFit.contain' rectangle
     final imageSize = Size(originalImage.width.toDouble(), originalImage.height.toDouble());
     final fittedSizes = applyBoxFit(BoxFit.contain, imageSize, size);
     final sourceRect = Alignment.center.inscribe(fittedSizes.source, Rect.fromLTWH(0, 0, imageSize.width, imageSize.height));
     final destinationRect = Alignment.center.inscribe(fittedSizes.destination, Rect.fromLTWH(0, 0, size.width, size.height));
 
-    // 2. Draw the Original Image
     canvas.drawImageRect(
       originalImage,
       sourceRect,
@@ -1493,7 +1500,6 @@ class _DetectionPainter extends CustomPainter {
 
     if (modelImageWidth == 0 || modelImageHeight == 0) return;
 
-    // 3. Calculate Model Padding and Scaling
     final double scale = min(modelImageWidth / imageSize.width, modelImageHeight / imageSize.height);
     final double padX = (modelImageWidth - imageSize.width * scale) / 2.0;
     final double padY = (modelImageHeight - imageSize.height * scale) / 2.0;
@@ -1501,7 +1507,6 @@ class _DetectionPainter extends CustomPainter {
     final double scaleToCanvasX = destinationRect.width / imageSize.width;
     final double scaleToCanvasY = destinationRect.height / imageSize.height;
 
-    // 4. Draw Masks
     if (showMasks && maskImage != null) {
       for (int i = 0; i < recognitions.length; i++) {
         if (selectedDetectionIndex != null && i != selectedDetectionIndex) continue;
@@ -1513,7 +1518,6 @@ class _DetectionPainter extends CustomPainter {
           ..colorFilter = ColorFilter.mode(color.withOpacity(maskOpacity), BlendMode.srcIn);
         
         canvas.save();
-        
         canvas.translate(destinationRect.left, destinationRect.top);
         canvas.scale(scaleToCanvasX / scale, scaleToCanvasY / scale);
         canvas.translate(-padX, -padY);
@@ -1524,12 +1528,10 @@ class _DetectionPainter extends CustomPainter {
           Rect.fromLTWH(0, 0, modelImageWidth, modelImageHeight),
           maskPaint,
         );
-        
         canvas.restore();
       }
     }
 
-    // 5. Draw Boxes and Labels
     for (int i = 0; i < recognitions.length; i++) {
       final detection = recognitions[i];
       final className = detection['className'] ?? 'Unknown';
