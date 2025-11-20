@@ -8,9 +8,9 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-feature android:glEsVersion="0x00020000" android:required="true" />
     <application
-        android:label="yolo_detect"
+        android:label="MAMBO"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/launcher_icon">
 
         <!-- Add uses-library tags INSIDE the application tag -->
         <uses-library android:name="org.apache.http.legacy" android:required="false"/>
