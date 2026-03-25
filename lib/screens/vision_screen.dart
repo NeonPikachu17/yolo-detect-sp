@@ -98,7 +98,6 @@ class _VisionScreenState extends State<VisionScreen> with SingleTickerProviderSt
     try {
       final targetModelPath = modelData['modelPath']!;
 
-      // We still need the full path (WITH .tflite) to check if the file physically exists
       if (!await File(targetModelPath).exists()) {
         throw Exception("Model file not found on device.");
       }
@@ -118,7 +117,7 @@ class _VisionScreenState extends State<VisionScreen> with SingleTickerProviderSt
       final String modelPathWithoutExtension = p.withoutExtension(targetModelPath);
 
       _yoloModel = YOLO(
-        modelPath: modelPathWithoutExtension, // Use the stripped path here
+        modelPath: modelPathWithoutExtension,
         task: yoloTask,
         // Apparently this is needed for new versions to avoid problems
         useMultiInstance: true,
@@ -375,7 +374,6 @@ class _VisionScreenState extends State<VisionScreen> with SingleTickerProviderSt
                         ),
                       ),
                     ),
-                    // FIXED: Changed from SliverFillRemaining to SliverToBoxAdapter
                     SliverToBoxAdapter(
                       child: Padding(
                         padding: const EdgeInsets.fromLTRB(16, 0, 16, 120),
@@ -743,7 +741,7 @@ class _VisionScreenState extends State<VisionScreen> with SingleTickerProviderSt
     
     return Container(
       key: const ValueKey('initial'),
-      height: screenHeight * 0.5, // FIXED: Added height to keep it centered
+      height: screenHeight * 0.5, // Added height to keep it centered
       padding: const EdgeInsets.symmetric(horizontal: 20),
       child: Center(
         child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
@@ -822,7 +820,7 @@ class _VisionScreenState extends State<VisionScreen> with SingleTickerProviderSt
   }
 
   Widget _buildDetectionView() {
-    // FIXED: Use MediaQuery instead of LayoutBuilder
+    // Use MediaQuery instead of LayoutBuilder
     final isWideScreen = MediaQuery.of(context).size.width > 700;
     
     if (isWideScreen) {
@@ -837,7 +835,7 @@ class _VisionScreenState extends State<VisionScreen> with SingleTickerProviderSt
   }
 
   Widget _buildClassificationView() {
-    // FIXED: Use MediaQuery instead of LayoutBuilder
+    // Use MediaQuery instead of LayoutBuilder
     final isWideScreen = MediaQuery.of(context).size.width > 700;
     
     if (isWideScreen) {

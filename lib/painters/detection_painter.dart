@@ -27,13 +27,13 @@ class DetectionPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    // --- 1. Calculate the 'fit: BoxFit.contain' rectangle ---
+    // Calculate the 'fit: BoxFit.contain' rectangle
     final imageSize = Size(originalImage.width.toDouble(), originalImage.height.toDouble());
     final fittedSizes = applyBoxFit(BoxFit.contain, imageSize, size);
     final sourceRect = Alignment.center.inscribe(fittedSizes.source, Rect.fromLTWH(0, 0, imageSize.width, imageSize.height));
     final destinationRect = Alignment.center.inscribe(fittedSizes.destination, Rect.fromLTWH(0, 0, size.width, size.height));
 
-    // --- 2. Draw the Original Image ---
+    // Draw the Original Image
     canvas.drawImageRect(
       originalImage,
       sourceRect,
@@ -43,7 +43,7 @@ class DetectionPainter extends CustomPainter {
 
     if (modelImageWidth == 0 || modelImageHeight == 0) return;
 
-    // --- 3. Calculate Model Padding and Scaling ---
+    // Calculate Model Padding and Scaling 
     final double scale = min(modelImageWidth / imageSize.width, modelImageHeight / imageSize.height);
     final double padX = (modelImageWidth - imageSize.width * scale) / 2.0;
     final double padY = (modelImageHeight - imageSize.height * scale) / 2.0;
@@ -51,7 +51,7 @@ class DetectionPainter extends CustomPainter {
     final double scaleToCanvasX = destinationRect.width / imageSize.width;
     final double scaleToCanvasY = destinationRect.height / imageSize.height;
 
-    // --- 4. Draw Masks ---
+    // Draw Masks
     if (showMasks && maskImage != null) {
       for (int i = 0; i < recognitions.length; i++) {
         if (selectedDetectionIndex != null && i != selectedDetectionIndex) continue;
@@ -79,7 +79,7 @@ class DetectionPainter extends CustomPainter {
       }
     }
 
-    // --- 5. Draw Boxes and Labels ---
+    // Draw Boxes and Labels
     for (int i = 0; i < recognitions.length; i++) {
       final detection = recognitions[i];
       final className = detection['className'] ?? 'Unknown';
