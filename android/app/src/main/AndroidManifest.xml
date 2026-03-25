@@ -9,7 +9,7 @@
     <application
         android:label="yolo_detect"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/launcher_icon">
 
         <!-- Add uses-library tags INSIDE the application tag -->
         <uses-library android:name="org.apache.http.legacy" android:required="false"/>

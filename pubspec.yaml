@@ -41,6 +41,11 @@ dependencies:
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
+  shared_preferences: ^2.5.3
+  firebase_core: ^4.6.0
+  firebase_storage: ^13.2.0
+  file_picker: ^10.3.10
+  flutter_launcher_icons: ^0.14.4
 
 dev_dependencies:
   flutter_test:
@@ -65,6 +70,14 @@ flutter:
   uses-material-design: true
   assets:
     - assets/models/
+    - assets/animations/
+
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: true
+  image_path: "assets/app_icon.png" # Since the image is right in your root folder
+  min_sdk_size: 23 # Keeps it compatible with your Android setup
+
 
   # To add assets to your application, add an assets section, like this:
   # assets:
